@@ -1,17 +1,19 @@
-"""Per-layer t-SNE of VLA hidden states.
+"""Per-layer UMAP of VLA hidden states.
 
 Usage:
-    python visualize_latents_per_layer.py --dir INPUT_DIR --model MODEL_NAME [--dataset DATASET_NAME] [--tokens {mean,first,last,first+last}] [--perplexity P [P ...]]
+    python umap_visualize_latents_per_layer.py --dir INPUT_DIR --model MODEL_NAME [--dataset DATASET_NAME] [--tokens {mean,first,last,first+last}] [--n-neighbors N [N ...]]
 
 INPUT_DIR must contain .pkl rollout files named `task<id>--ep<idx>--succ{0,1}.pkl`.
-Output PNGs are written to data/visualization by default, tagged with MODEL_NAME, optional DATASET_NAME, token choice, and perplexity.
+Output PNGs are written to data/visualization by default, tagged with MODEL_NAME,
+optional DATASET_NAME, token choice, and n_neighbors.
 
 Pipeline:
 1. load every rollout from INPUT_DIR,
 2. select/pool the per-step hidden state across action tokens with --tokens,
 3. split the concatenated layer features into (n_layers, feature_dim),
-4. fit ONE t-SNE per layer across all rollouts,
-5. plot two panels per layer:
+4. PCA-pre-reduce each layer to 50d when needed (matching the per-layer t-SNE pipeline),
+5. fit ONE UMAP per layer across all rollouts,
+6. plot two panels per layer:
       (a) success rollouts in solid blue, failure rollouts blue->red by timestep
       (b) same projection, colored by task id.
 """
@@ -29,7 +31,7 @@ import torch
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
+from umap import UMAP
 
 try:
     from .action_token_pooling import (
@@ -55,6 +57,12 @@ NAME_RE = re.compile(r"task(\d+)--ep(\d+)--succ([01])\.pkl$")
 
 SUCCESS_BLUE = "#0000ff"
 FAIL_CMAP = LinearSegmentedColormap.from_list("fail_grad", ["#0000ff", "#ff0000"])
+
+PCA_DIMS = 50
+DEFAULT_N_NEIGHBORS = [15]
+MIN_DIST = 0.1
+METRIC = "euclidean"
+RANDOM_STATE = 0
 
 
 def load_rollouts(folder: Path, tokens: str):
@@ -86,31 +94,63 @@ def load_rollouts(folder: Path, tokens: str):
     return rollouts
 
 
-def tsne_per_layer(rollouts, perplexity=30.0, random_state=0):
-    """Fit t-SNE per layer on the concatenation of all rollouts. Returns dict layer_idx -> (N, 2)."""
+def effective_n_neighbors(n_neighbors: int, n_samples: int) -> int:
+    if n_neighbors <= 1:
+        raise SystemExit(f"n_neighbors must be > 1, got {n_neighbors}")
+    if n_samples <= 2:
+        raise SystemExit(f"UMAP needs at least 3 samples, got {n_samples}")
+    eff = min(n_neighbors, n_samples - 1)
+    if eff != n_neighbors:
+        print(f"  requested n_neighbors={n_neighbors}; using {eff} for N={n_samples}")
+    return eff
+
+
+def pca_pre_reduce_layer(X: np.ndarray, random_state: int = RANDOM_STATE):
+    """Apply the same per-layer PCA rule as the t-SNE per-layer script."""
+    if X.shape[1] <= PCA_DIMS:
+        return X.astype(np.float32), X.shape[1]
+    pca_dims = min(PCA_DIMS, X.shape[0], X.shape[1])
+    X_reduced = PCA(n_components=pca_dims, random_state=random_state).fit_transform(X)
+    return X_reduced.astype(np.float32), pca_dims
+
+
+def umap_per_layer(
+    rollouts,
+    n_neighbors: int = 15,
+    min_dist: float = MIN_DIST,
+    metric: str = METRIC,
+    random_state: int = RANDOM_STATE,
+):
+    """Fit UMAP per layer on the concatenation of all rollouts.
+
+    Returns (embeds, lengths, pca_dims_by_layer), where embeds maps layer slot -> (N, 2).
+    """
     n_layers = rollouts[0]["feats"].shape[1]
     lengths = [r["feats"].shape[0] for r in rollouts]
 
     out = {}
+    pca_dims_by_layer = {}
     for layer in range(n_layers):
         X = np.concatenate(
             [r["feats"][:, layer, :] for r in rollouts], axis=0
         )  # (sum_steps, hidden_dim)
         n_samples = X.shape[0]
-        # PCA pre-reduce (standard t-SNE practice) when dim > 50
-        if X.shape[1] > 50:
-            X = PCA(n_components=50, random_state=random_state).fit_transform(X)
-        ppl = min(perplexity, max(5.0, (n_samples - 1) / 3))
-        emb = TSNE(
+        X_reduced, pca_dims = pca_pre_reduce_layer(X, random_state=random_state)
+        pca_dims_by_layer[layer] = pca_dims
+        nn = effective_n_neighbors(n_neighbors, n_samples)
+        emb = UMAP(
             n_components=2,
-            perplexity=ppl,
-            init="pca",
-            learning_rate="auto",
+            n_neighbors=nn,
+            min_dist=min_dist,
+            metric=metric,
             random_state=random_state,
-        ).fit_transform(X)
+        ).fit_transform(X_reduced)
         out[layer] = emb
-        print(f"  layer {layer}: t-SNE done (N={n_samples}, perplexity={ppl:.1f})")
-    return out, lengths
+        print(
+            f"  layer {layer}: UMAP done "
+            f"(N={n_samples}, PCA-{pca_dims}, n_neighbors={nn}, min_dist={min_dist:g})"
+        )
+    return out, lengths, pca_dims_by_layer
 
 
 def plot_model(
@@ -120,7 +160,8 @@ def plot_model(
     lengths,
     save_path: Path,
     dataset_name: str | None = None,
-    perplexity: float | None = None,
+    n_neighbors: int | None = None,
+    min_dist: float | None = None,
     token_desc: str = "mean over action tokens",
 ):
     n_layers = len(embeds)
@@ -252,10 +293,12 @@ def plot_model(
     title_prefix = (
         model_name if dataset_name is None else f"{model_name} / {dataset_name}"
     )
-    perplexity_text = "" if perplexity is None else f", perplexity={perplexity:g}"
+    neighbor_text = "" if n_neighbors is None else f", n_neighbors={n_neighbors}"
+    min_dist_text = "" if min_dist is None else f", min_dist={min_dist:g}"
     fig.suptitle(
-        f"{title_prefix}: per-layer t-SNE of hidden states "
-        f"({len(rollouts)} rollouts: {n_succ} success / {n_fail} fail, {token_desc}{perplexity_text})",
+        f"{title_prefix}: per-layer UMAP of hidden states "
+        f"({len(rollouts)} rollouts: {n_succ} success / {n_fail} fail, "
+        f"{token_desc}, PCA≤{PCA_DIMS}{neighbor_text}{min_dist_text})",
         fontsize=12,
     )
     fig.tight_layout(rect=(0.0, 0.0, 0.92, 0.985))
@@ -320,11 +363,27 @@ def main():
         help="action-token selection/pooling: mean, first, last, or first+last (default: mean)",
     )
     p.add_argument(
-        "--perplexity",
-        type=float,
+        "--n-neighbors",
+        "--n_neighbors",
+        "--neighbors",
+        dest="n_neighbors",
+        type=int,
         nargs="+",
-        default=[30.0],
-        help="one or more t-SNE perplexities to try, e.g. --perplexity 5 10 30 50",
+        default=DEFAULT_N_NEIGHBORS,
+        help="one or more UMAP n_neighbors values to try, e.g. --n-neighbors 5 15 50",
+    )
+    p.add_argument(
+        "--min-dist",
+        "--min_dist",
+        dest="min_dist",
+        type=float,
+        default=MIN_DIST,
+        help=f"UMAP min_dist (default: {MIN_DIST})",
+    )
+    p.add_argument(
+        "--metric",
+        default=METRIC,
+        help=f"UMAP metric (default: {METRIC})",
     )
     p.add_argument(
         "--output-dir",
@@ -358,15 +417,20 @@ def main():
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for perplexity in args.perplexity:
-        print(f"running per-layer t-SNE with perplexity={perplexity:g}")
-        embeds, lengths = tsne_per_layer(rollouts, perplexity=perplexity)
+    for n_neighbors in args.n_neighbors:
+        print(f"running per-layer UMAP with n_neighbors={n_neighbors}")
+        embeds, lengths, _ = umap_per_layer(
+            rollouts,
+            n_neighbors=n_neighbors,
+            min_dist=args.min_dist,
+            metric=args.metric,
+        )
 
-        filename_parts = ["latent_tsne_per_layer", slugify(args.model_name)]
+        filename_parts = ["latent_umap_per_layer", slugify(args.model_name)]
         if args.dataset_name:
             filename_parts.append(slugify(args.dataset_name))
         filename_parts.append(f"tokens-{token_tag}")
-        filename_parts.append(f"perp{perplexity:g}")
+        filename_parts.append(f"nn{n_neighbors}")
         save = output_dir / ("_".join(filename_parts) + ".png")
         plot_model(
             args.model_name,
@@ -375,7 +439,8 @@ def main():
             lengths,
             save,
             args.dataset_name,
-            perplexity,
+            n_neighbors,
+            args.min_dist,
             token_desc,
         )
 

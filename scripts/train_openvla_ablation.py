@@ -15,6 +15,7 @@ import csv
 import json
 import random
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -148,6 +149,89 @@ def split_indices(
     }
 
 
+def task_ids_for_dataset(dataset: OpenVLARolloutDataset) -> list[int]:
+    task_ids: list[int] = []
+    for info in dataset.rollouts:
+        artifact = dataset._load_pickle(info.path)
+        task_id = dataset._read_task_id(artifact, info)
+        if task_id is None:
+            raise KeyError(f"Could not infer task_id for {info.path}")
+        task_ids.append(task_id)
+    return task_ids
+
+
+def split_indices_by_task(
+    dataset: OpenVLARolloutDataset,
+    unseen_task_ratio: float,
+    seen_train_ratio: float,
+    seed: int,
+) -> tuple[dict[str, list[int]], dict[str, object]]:
+    """SAFE-style split: hold out task IDs, then split seen-task rollouts."""
+
+    if not 0.0 <= unseen_task_ratio < 1.0:
+        raise ValueError("unseen_task_ratio must be in [0, 1)")
+    if not 0.0 < seen_train_ratio < 1.0:
+        raise ValueError("seen_train_ratio must be in (0, 1)")
+
+    task_ids = task_ids_for_dataset(dataset)
+    unique_task_ids = sorted(set(task_ids))
+    if len(unique_task_ids) < 2:
+        raise ValueError("Task-level split requires at least two task IDs")
+
+    rng = np.random.default_rng(seed)
+    shuffled_tasks = list(rng.permutation(unique_task_ids))
+    n_unseen = round(unseen_task_ratio * len(unique_task_ids))
+    if unseen_task_ratio > 0 and n_unseen == 0:
+        n_unseen = 1
+    if n_unseen >= len(unique_task_ids):
+        n_unseen = len(unique_task_ids) - 1
+
+    unseen_task_ids = sorted(int(task_id) for task_id in shuffled_tasks[:n_unseen])
+    seen_task_ids = sorted(int(task_id) for task_id in shuffled_tasks[n_unseen:])
+    unseen_set = set(unseen_task_ids)
+
+    train_indices: list[int] = []
+    val_indices: list[int] = []
+    test_indices: list[int] = []
+    per_task_counts: dict[str, dict[str, int]] = {}
+
+    for task_id in unique_task_ids:
+        indices = [idx for idx, rollout_task_id in enumerate(task_ids) if rollout_task_id == task_id]
+        indices = [int(idx) for idx in rng.permutation(indices)]
+        if task_id in unseen_set:
+            test_indices.extend(indices)
+            per_task_counts[str(task_id)] = {"train": 0, "val": 0, "test": len(indices)}
+            continue
+
+        n_train = int(seen_train_ratio * len(indices))
+        if len(indices) > 1:
+            n_train = min(max(n_train, 1), len(indices) - 1)
+        train_part = indices[:n_train]
+        val_part = indices[n_train:]
+        train_indices.extend(train_part)
+        val_indices.extend(val_part)
+        per_task_counts[str(task_id)] = {
+            "train": len(train_part),
+            "val": len(val_part),
+            "test": 0,
+        }
+
+    split = {
+        "train": sorted(train_indices),
+        "val": sorted(val_indices),
+        "test": sorted(test_indices),
+    }
+    metadata = {
+        "split_mode": "task",
+        "unseen_task_ratio": unseen_task_ratio,
+        "seen_train_ratio": seen_train_ratio,
+        "seen_task_ids": seen_task_ids,
+        "unseen_task_ids": unseen_task_ids,
+        "per_task_counts": per_task_counts,
+    }
+    return split, metadata
+
+
 def labels_for_dataset(dataset: OpenVLARolloutDataset) -> list[int]:
     labels: list[int] = []
     for info in dataset.rollouts:
@@ -221,6 +305,68 @@ def build_model(
     return model.to(device)
 
 
+def sanitize_config_value(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, list):
+        return [sanitize_config_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: sanitize_config_value(item) for key, item in value.items()}
+    return value
+
+
+def init_wandb_run(
+    args: argparse.Namespace,
+    exp: Experiment,
+    dataset: OpenVLARolloutDataset,
+    split: dict[str, list[int]],
+):
+    if not args.wandb:
+        return None
+
+    try:
+        import wandb
+    except ImportError as exc:
+        raise ImportError(
+            "W&B logging requested with --wandb, but wandb is not installed. "
+            "Install it or run through uv with `--with wandb`."
+        ) from exc
+
+    base_config = {key: sanitize_config_value(value) for key, value in vars(args).items()}
+    base_config.update(
+        {
+            "experiment": asdict(exp),
+            "model_type": exp.model_type,
+            "selected_layers": list(dataset.selected_layers),
+            "saved_layers": list(dataset.saved_layers),
+            "token_pool": "last",
+            "input_dim": dataset.input_dim,
+            "hidden_dim_per_layer": dataset.hidden_dim,
+            "n_rollouts": len(dataset),
+            "split_sizes": {name: len(indices) for name, indices in split.items()},
+        }
+    )
+
+    if args.wandb_run_name:
+        run_name = f"{args.wandb_run_name}-{exp.name}"
+    else:
+        run_name = f"{args.wandb_run_prefix}{exp.name}"
+
+    return wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=run_name,
+        group=args.wandb_group,
+        job_type=exp.model_type,
+        tags=args.wandb_tags,
+        mode=args.wandb_mode,
+        config=base_config,
+        reinit="finish_previous",
+    )
+
+
 def move_batch(batch: dict, device: torch.device) -> dict:
     moved = {}
     for key, value in batch.items():
@@ -285,6 +431,7 @@ def train_one_experiment(
         device=device,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    wandb_run = init_wandb_run(args, exp, dataset, split)
 
     best_val = float("inf")
     best_state = None
@@ -304,6 +451,7 @@ def train_one_experiment(
             train_losses.append(float(loss.detach().cpu()))
 
         val_metrics = evaluate(model, loaders["val"], device) if "val" in loaders else {"loss": float("nan")}
+        train_loss = float(np.mean(train_losses)) if train_losses else float("nan")
         val_loss = val_metrics["loss"]
         improved = val_loss < best_val
         if improved:
@@ -317,10 +465,23 @@ def train_one_experiment(
         if epoch == 1 or epoch % args.log_every == 0 or epoch == args.epochs:
             print(
                 f"{exp.name} epoch={epoch:03d} "
-                f"train_loss={np.mean(train_losses):.4f} "
+                f"train_loss={train_loss:.4f} "
                 f"val_loss={val_metrics['loss']:.4f} "
                 f"val_auc={val_metrics.get('roc_auc', float('nan')):.4f}"
             )
+
+        if wandb_run is not None:
+            log_payload = {
+                "epoch": epoch,
+                "train/loss": train_loss,
+                "val/loss": val_metrics["loss"],
+                "val/roc_auc": val_metrics.get("roc_auc", float("nan")),
+                "val/tpr_at_5_fpr": val_metrics.get("tpr_at_5_fpr", float("nan")),
+            }
+            if isinstance(model, LayerMixLSTMModel):
+                for layer, weight in zip(dataset.selected_layers, model.layer_weights.cpu().tolist()):
+                    log_payload[f"layer_weights/layer_{layer}"] = weight
+            wandb_run.log(log_payload, step=epoch)
 
         if patience_left <= 0:
             break
@@ -365,6 +526,24 @@ def train_one_experiment(
         checkpoint_path,
     )
     result["checkpoint_path"] = str(checkpoint_path)
+
+    if wandb_run is not None:
+        wandb_run.log(
+            {
+                "best_epoch": best_epoch,
+                "final/val_loss": result["val_loss"],
+                "final/val_roc_auc": result["val_roc_auc"],
+                "final/val_tpr_at_5_fpr": result["val_tpr_at_5_fpr"],
+                "test/loss": result["test_loss"],
+                "test/roc_auc": result["test_roc_auc"],
+                "test/tpr_at_5_fpr": result["test_tpr_at_5_fpr"],
+            }
+        )
+        if args.wandb_log_checkpoints:
+            artifact = wandb_run.Artifact(f"{exp.name}-checkpoint", type="model")
+            artifact.add_file(str(checkpoint_path))
+            wandb_run.log_artifact(artifact)
+        wandb_run.finish()
     return result
 
 
@@ -414,10 +593,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--train-frac", type=float, default=0.7)
     parser.add_argument("--val-frac", type=float, default=0.15)
+    parser.add_argument(
+        "--split-mode",
+        default="task",
+        choices=["task", "random"],
+        help="Use SAFE-style task holdout by default; random is rollout-level.",
+    )
+    parser.add_argument(
+        "--unseen-task-ratio",
+        type=float,
+        default=0.3,
+        help="Fraction of task IDs held out for unseen-task test when split-mode=task.",
+    )
+    parser.add_argument(
+        "--seen-train-ratio",
+        type=float,
+        default=0.6,
+        help="Fraction of seen-task rollouts used for training when split-mode=task.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=5)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--wandb", action="store_true", help="Log training progress to Weights & Biases.")
+    parser.add_argument("--wandb-project", default="extend-safe", help="W&B project name.")
+    parser.add_argument("--wandb-entity", default=None, help="Optional W&B entity or team.")
+    parser.add_argument("--wandb-run-name", default=None, help="Optional base run name; experiment name is appended.")
+    parser.add_argument("--wandb-run-prefix", default="", help="Optional prefix for per-ablation W&B run names.")
+    parser.add_argument("--wandb-group", default=None, help="Shared W&B group for all ablation runs.")
+    parser.add_argument("--wandb-tags", nargs="*", default=[], help="Optional W&B tags.")
+    parser.add_argument(
+        "--wandb-mode",
+        default="online",
+        choices=["online", "offline", "disabled"],
+        help="W&B mode. Use offline to log locally without uploading.",
+    )
+    parser.add_argument(
+        "--wandb-log-checkpoints",
+        action="store_true",
+        help="Log model checkpoints as W&B artifacts.",
+    )
     parser.add_argument(
         "--only",
         nargs="*",
@@ -440,16 +655,34 @@ def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.wandb and args.wandb_group is None:
+        args.wandb_group = f"openvla-ablation-{int(time.time())}"
 
     root = args.root.expanduser().resolve()
     device = torch.device(args.device)
 
     saved_layers = discover_saved_layers(root)
     base_dataset = OpenVLARolloutDataset(root, layers=(saved_layers[-1],), token_pool="last", recursive=True)
-    labels = labels_for_dataset(base_dataset)
-    split = split_indices(labels, args.train_frac, args.val_frac, args.seed)
+    if args.split_mode == "task":
+        split, split_metadata = split_indices_by_task(
+            base_dataset,
+            unseen_task_ratio=args.unseen_task_ratio,
+            seen_train_ratio=args.seen_train_ratio,
+            seed=args.seed,
+        )
+    else:
+        labels = labels_for_dataset(base_dataset)
+        split = split_indices(labels, args.train_frac, args.val_frac, args.seed)
+        split_metadata = {
+            "split_mode": "random",
+            "train_frac": args.train_frac,
+            "val_frac": args.val_frac,
+            "test_frac": 1.0 - args.train_frac - args.val_frac,
+        }
     with (args.output_dir / "split_indices.json").open("w") as handle:
         json.dump(split, handle, indent=2)
+    with (args.output_dir / "split_metadata.json").open("w") as handle:
+        json.dump(split_metadata, handle, indent=2)
 
     experiments = build_default_experiments(saved_layers)
     if args.custom_layers is not None:
@@ -463,6 +696,7 @@ def main() -> None:
     print(f"root={root}")
     print(f"saved_layers={saved_layers}")
     print(f"token_pool=last")
+    print(f"split_metadata={split_metadata}")
     print(f"split_sizes={ {name: len(idx) for name, idx in split.items()} }")
     print(f"running {len(experiments)} experiments on {device}")
 

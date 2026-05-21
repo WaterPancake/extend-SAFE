@@ -6,10 +6,10 @@ rollout to keep total points tractable, PCA-pre-reduce to 50d, then fit one t-SN
 across all rollouts.
 
 Usage:
-    python visualize_latents_tsne.py [INPUT_DIR] [--layer {all,last,<int>}] [--tokens {mean,first,last,first+last}]
+    python visualize_latents_tsne.py [INPUT_DIR] [--layer {all,last,<int>}] [--tokens {mean,first,last,first+last}] [--perplexity P [P ...]]
 
 INPUT_DIR must contain .pkl rollout files named `task<id>--ep<idx>--succ{0,1}.pkl`.
-Output PNG is written to data/visualization, tagged with the input dir name, layer choice, and token choice.
+Output PNGs are written to data/visualization, tagged with the input dir name, layer choice, token choice, and perplexity.
 """
 
 import argparse
@@ -60,7 +60,7 @@ FAIL_CMAP = LinearSegmentedColormap.from_list("fail_grad", ["#1f4e8c", "#c0392b"
 
 STRIDE = 4  # keep every 4th step within each rollout
 PCA_DIMS = 50  # pre-reduction before t-SNE
-PERPLEXITY = 20
+DEFAULT_PERPLEXITY = 20.0
 RANDOM_STATE = 0
 
 
@@ -128,7 +128,18 @@ def main():
         default="mean",
         help="action-token selection/pooling: mean, first, last, or first+last (default: mean)",
     )
+    p.add_argument(
+        "--perplexity",
+        "--perplexities",
+        type=float,
+        nargs="+",
+        default=[DEFAULT_PERPLEXITY],
+        help="one or more t-SNE perplexities to try, e.g. --perplexity 5 10 20 50",
+    )
     args = p.parse_args()
+
+    if any(perplexity <= 0 for perplexity in args.perplexity):
+        raise SystemExit("all perplexity values must be positive")
 
     rollout_dir = Path(args.input_dir).expanduser().resolve()
     if not rollout_dir.is_dir():
@@ -148,7 +159,6 @@ def main():
     print(f"  feature slice: {feat_desc}")
     dir_tag = rollout_dir.name
     VISUALIZATION_DIR.mkdir(parents=True, exist_ok=True)
-    OUT_PATH = VISUALIZATION_DIR / f"latent_space_viz_tsne__{dir_tag}__{tag}__tokens-{token_tag}.png"
 
     lengths = [s.shape[0] for s in sliced]
     starts = np.cumsum([0] + lengths)
@@ -160,126 +170,155 @@ def main():
     print(f"  PCA -> {pca_dims}d ...")
     X50 = PCA(n_components=pca_dims, random_state=RANDOM_STATE).fit_transform(X)
 
-    print(f"  t-SNE (perplexity={PERPLEXITY}) ...")
-    xy = TSNE(
-        n_components=2,
-        perplexity=PERPLEXITY,
-        random_state=RANDOM_STATE,
-        **_TSNE_KW,
-    ).fit_transform(X50.astype(np.float32))
+    n_samples = X50.shape[0]
+    if n_samples <= 1:
+        raise SystemExit("need at least two sampled points to run t-SNE")
 
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(13, 6), sharex=True, sharey=True)
-
-    # ---- (a) success solid blue, failure blue->red by normalized timestep -------
-    for i, r in enumerate(rollouts):
-        s, e = starts[i], starts[i + 1]
-        pts = xy[s:e]
-        if r["success"]:
-            ax_a.scatter(
-                pts[:, 0], pts[:, 1], c=SUCCESS_BLUE, s=4, alpha=0.30, edgecolors="none"
+    for perplexity in args.perplexity:
+        effective_perplexity = min(perplexity, max(1.0, n_samples - 1.0))
+        if effective_perplexity != perplexity:
+            print(
+                f"  requested perplexity={perplexity:g} is too high for N={n_samples}; "
+                f"using {effective_perplexity:g}"
             )
-        else:
-            ax_a.scatter(
+        perplexity_tag = f"perp{perplexity:g}"
+        out_path = (
+            VISUALIZATION_DIR
+            / f"latent_space_viz_tsne__{dir_tag}__{tag}__tokens-{token_tag}__{perplexity_tag}.png"
+        )
+
+        print(f"  t-SNE (perplexity={effective_perplexity:g}) ...")
+        xy = TSNE(
+            n_components=2,
+            perplexity=effective_perplexity,
+            random_state=RANDOM_STATE,
+            **_TSNE_KW,
+        ).fit_transform(X50.astype(np.float32))
+
+        fig, (ax_a, ax_b) = plt.subplots(
+            1, 2, figsize=(13, 6), sharex=True, sharey=True
+        )
+
+        # ---- (a) success solid blue, failure blue->red by normalized timestep -------
+        for i, r in enumerate(rollouts):
+            s, e = starts[i], starts[i + 1]
+            pts = xy[s:e]
+            if r["success"]:
+                ax_a.scatter(
+                    pts[:, 0],
+                    pts[:, 1],
+                    c=SUCCESS_BLUE,
+                    s=4,
+                    alpha=0.30,
+                    edgecolors="none",
+                )
+            else:
+                ax_a.scatter(
+                    pts[:, 0],
+                    pts[:, 1],
+                    c=step_frac[s:e],
+                    cmap=FAIL_CMAP,
+                    s=5,
+                    alpha=0.65,
+                    edgecolors="none",
+                    vmin=0,
+                    vmax=1,
+                )
+        n_succ = sum(r["success"] for r in rollouts)
+        n_fail = len(rollouts) - n_succ
+        ax_a.set_title(
+            f"success ({n_succ}, blue) / fail ({n_fail}, blue→red by timestep)"
+        )
+        ax_a.set_xlabel("t-SNE 1")
+        ax_a.set_ylabel("t-SNE 2")
+        ax_a.legend(
+            handles=[
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="w",
+                    markerfacecolor=SUCCESS_BLUE,
+                    markersize=6,
+                    label="success",
+                ),
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="w",
+                    markerfacecolor=FAIL_CMAP(0.0),
+                    markersize=6,
+                    label="fail t=0",
+                ),
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="w",
+                    markerfacecolor=FAIL_CMAP(1.0),
+                    markersize=6,
+                    label="fail t=T",
+                ),
+            ],
+            loc="best",
+            fontsize=8,
+            frameon=False,
+        )
+
+        # ---- (b) colored by task id ------------------------------------------------
+        task_ids = sorted({r["task_id"] for r in rollouts})
+        cmap = plt.get_cmap("tab20", max(len(task_ids), 2))
+        task_color = {tid: cmap(i) for i, tid in enumerate(task_ids)}
+        for i, r in enumerate(rollouts):
+            s, e = starts[i], starts[i + 1]
+            pts = xy[s:e]
+            ax_b.scatter(
                 pts[:, 0],
                 pts[:, 1],
-                c=step_frac[s:e],
-                cmap=FAIL_CMAP,
-                s=5,
-                alpha=0.65,
+                color=task_color[r["task_id"]],
+                s=4,
+                alpha=0.40,
                 edgecolors="none",
-                vmin=0,
-                vmax=1,
             )
-    n_succ = sum(r["success"] for r in rollouts)
-    n_fail = len(rollouts) - n_succ
-    ax_a.set_title(f"success ({n_succ}, blue) / fail ({n_fail}, blue→red by timestep)")
-    ax_a.set_xlabel("t-SNE 1")
-    ax_a.set_ylabel("t-SNE 2")
-    ax_a.legend(
-        handles=[
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor=SUCCESS_BLUE,
-                markersize=6,
-                label="success",
-            ),
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor=FAIL_CMAP(0.0),
-                markersize=6,
-                label="fail t=0",
-            ),
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor=FAIL_CMAP(1.0),
-                markersize=6,
-                label="fail t=T",
-            ),
-        ],
-        loc="best",
-        fontsize=8,
-        frameon=False,
-    )
-
-    # ---- (b) colored by task id ------------------------------------------------
-    task_ids = sorted({r["task_id"] for r in rollouts})
-    cmap = plt.get_cmap("tab20", max(len(task_ids), 2))
-    task_color = {tid: cmap(i) for i, tid in enumerate(task_ids)}
-    for i, r in enumerate(rollouts):
-        s, e = starts[i], starts[i + 1]
-        pts = xy[s:e]
-        ax_b.scatter(
-            pts[:, 0],
-            pts[:, 1],
-            color=task_color[r["task_id"]],
-            s=4,
-            alpha=0.40,
-            edgecolors="none",
-        )
-    ax_b.set_title(f"by task id ({len(task_ids)} tasks)")
-    ax_b.set_xlabel("t-SNE 1")
-    if len(task_ids) <= 20:
-        handles = [
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor=task_color[t],
-                markersize=6,
-                label=f"task {t}",
+        ax_b.set_title(f"by task id ({len(task_ids)} tasks)")
+        ax_b.set_xlabel("t-SNE 1")
+        if len(task_ids) <= 20:
+            handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="w",
+                    markerfacecolor=task_color[t],
+                    markersize=6,
+                    label=f"task {t}",
+                )
+                for t in task_ids
+            ]
+            ax_b.legend(
+                handles=handles,
+                loc="center left",
+                bbox_to_anchor=(1.02, 0.5),
+                fontsize=7,
+                frameon=False,
+                ncol=1,
             )
-            for t in task_ids
-        ]
-        ax_b.legend(
-            handles=handles,
-            loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
-            fontsize=7,
-            frameon=False,
-            ncol=1,
-        )
 
-    fig.suptitle(
-        f"{dir_tag}: per-step hidden state ({token_desc}, "
-        f"{feat_desc}) → PCA-{pca_dims} → t-SNE-2D\n"
-        f"{len(rollouts)} rollouts, {X.shape[0]} sampled steps (stride {STRIDE}), "
-        f"perplexity={PERPLEXITY}",
-        fontsize=11,
-    )
-    fig.tight_layout(rect=(0.0, 0.0, 0.93, 0.93))
-    fig.savefig(OUT_PATH, dpi=150)
-    plt.close(fig)
-    print(f"saved -> {OUT_PATH}")
+        perplexity_title = f"perplexity={perplexity:g}"
+        if effective_perplexity != perplexity:
+            perplexity_title += f" (effective {effective_perplexity:g})"
+        fig.suptitle(
+            f"{dir_tag}: per-step hidden state ({token_desc}, "
+            f"{feat_desc}) → PCA-{pca_dims} → t-SNE-2D\n"
+            f"{len(rollouts)} rollouts, {X.shape[0]} sampled steps (stride {STRIDE}), "
+            f"{perplexity_title}",
+            fontsize=11,
+        )
+        fig.tight_layout(rect=(0.0, 0.0, 0.93, 0.93))
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"saved -> {out_path}")
 
 
 if __name__ == "__main__":

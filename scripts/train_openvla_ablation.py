@@ -16,7 +16,8 @@ import json
 import random
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from itertools import product
 from pathlib import Path
 from typing import Iterable
 
@@ -35,6 +36,10 @@ from models import LayerMixLSTMModel, LinearProbeModel, SafeLSTMModel, SafeMLPMo
 
 
 DEFAULT_ROOT = Path("data/rollouts/openvla")
+SAFE_OPENVLA_LIBERO_UNSEEN_ROC_AUC = {
+    "lstm": 0.7247,
+    "mlp": 0.7347,
+}
 
 
 @dataclass(frozen=True)
@@ -42,14 +47,61 @@ class Experiment:
     name: str
     model_type: str
     layers: tuple[int, ...]
+    token_pool: str = "last"
+    lr: float | None = None
+    lambda_reg: float | None = None
+    seed: int | None = None
+    n_history_steps: int = 1
 
 
 def parse_layers(value: str) -> tuple[int, ...]:
     return tuple(int(item.strip()) for item in value.split(",") if item.strip())
 
 
+def parse_csv_strings(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def parse_csv_floats(value: str) -> tuple[float, ...]:
+    return tuple(float(item.strip()) for item in value.split(",") if item.strip())
+
+
+def parse_csv_ints(value: str) -> tuple[int, ...]:
+    return tuple(int(item.strip()) for item in value.split(",") if item.strip())
+
+
+def normalize_token_pool(value: str) -> str:
+    """Map SAFE token_idx_rel values to local action-token pooling names."""
+
+    normalized = value.strip().lower()
+    aliases = {
+        "0": "first",
+        "0.0": "first",
+        "first": "first",
+        "1": "last",
+        "1.0": "last",
+        "last": "last",
+        "mean": "mean",
+        "first+last": "first_last",
+        "first-last": "first_last",
+        "first_last": "first_last",
+        "none": "none",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            f"Unsupported token pool {value!r}; use mean, 0.0/first, 1.0/last, first_last, or none"
+        )
+    return aliases[normalized]
+
+
+def token_pool_tag(value: str) -> str:
+    return normalize_token_pool(value).replace("_", "-")
+
+
 def discover_saved_layers(root: Path) -> tuple[int, ...]:
-    dataset = OpenVLARolloutDataset(root, layers=None, token_pool="last", recursive=True)
+    dataset = OpenVLARolloutDataset(
+        root, layers=None, token_pool="last", recursive=True
+    )
     return tuple(dataset.saved_layers)
 
 
@@ -71,10 +123,12 @@ def build_default_experiments(saved_layers: tuple[int, ...]) -> list[Experiment]
         Experiment("layer_mix_all_captured", "layer_mix", saved_layers),
     ]
     experiments.extend(
-        Experiment(f"linear_probe_layer_{layer}", "linear_probe", (layer,)) for layer in saved_layers
+        Experiment(f"linear_probe_layer_{layer}", "linear_probe", (layer,))
+        for layer in saved_layers
     )
     experiments.extend(
-        Experiment(f"safe_lstm_layer_{layer}", "lstm", (layer,)) for layer in saved_layers
+        Experiment(f"safe_lstm_layer_{layer}", "lstm", (layer,))
+        for layer in saved_layers
     )
     return experiments
 
@@ -95,6 +149,57 @@ def filter_experiments(
             continue
         out.append(exp)
     return out
+
+
+def build_safe_openvla_libero_experiments(
+    saved_layers: tuple[int, ...],
+    seeds: tuple[int, ...],
+    token_pools: tuple[str, ...],
+    lrs: tuple[float, ...],
+    lambda_regs: tuple[float, ...],
+    models: tuple[str, ...],
+    history_steps: tuple[int, ...],
+) -> list[Experiment]:
+    """Grid from SAFE's OpenVLA LIBERO batch-training script."""
+
+    final_layer = (saved_layers[-1],)
+    experiments: list[Experiment] = []
+    for seed, token_pool_raw, lr, lambda_reg, model in product(
+        seeds, token_pools, lrs, lambda_regs, models
+    ):
+        token_pool = normalize_token_pool(token_pool_raw)
+        model_name = model.strip().lower()
+        if model_name in {"indep", "mlp", "safe_mlp"}:
+            model_type = "mlp"
+            model_tag = "safe_mlp"
+        elif model_name in {"lstm", "safe_lstm"}:
+            model_type = "lstm"
+            model_tag = "safe_lstm"
+        else:
+            raise ValueError(
+                f"Unsupported SAFE sweep model {model!r}; use lstm or mlp/indep"
+            )
+
+        model_history_steps = history_steps if model_type == "mlp" else (1,)
+        for n_history_steps in model_history_steps:
+            history_tag = f"_hist-{n_history_steps}" if n_history_steps != 1 else ""
+            name = (
+                f"{model_tag}_tok-{token_pool_tag(token_pool)}"
+                f"_lr-{lr:g}_reg-{lambda_reg:g}{history_tag}_seed-{seed}"
+            )
+            experiments.append(
+                Experiment(
+                    name=name,
+                    model_type=model_type,
+                    layers=final_layer,
+                    token_pool=token_pool,
+                    lr=lr,
+                    lambda_reg=lambda_reg,
+                    seed=seed,
+                    n_history_steps=n_history_steps,
+                )
+            )
+    return experiments
 
 
 def seed_everything(seed: int) -> None:
@@ -166,7 +271,7 @@ def split_indices_by_task(
     seen_train_ratio: float,
     seed: int,
 ) -> tuple[dict[str, list[int]], dict[str, object]]:
-    """SAFE-style split: hold out task IDs, then split seen-task rollouts."""
+    """SAFE repo split: shuffle task IDs, hold out unseen tasks, split seen rollouts."""
 
     if not 0.0 <= unseen_task_ratio < 1.0:
         raise ValueError("unseen_task_ratio must be in [0, 1)")
@@ -174,35 +279,45 @@ def split_indices_by_task(
         raise ValueError("seen_train_ratio must be in (0, 1)")
 
     task_ids = task_ids_for_dataset(dataset)
-    unique_task_ids = sorted(set(task_ids))
+    task_id_order = list(set(task_ids))
+    unique_task_ids = sorted(task_id_order)
     if len(unique_task_ids) < 2:
         raise ValueError("Task-level split requires at least two task IDs")
 
-    rng = np.random.default_rng(seed)
-    shuffled_tasks = list(rng.permutation(unique_task_ids))
     n_unseen = round(unseen_task_ratio * len(unique_task_ids))
     if unseen_task_ratio > 0 and n_unseen == 0:
         n_unseen = 1
     if n_unseen >= len(unique_task_ids):
         n_unseen = len(unique_task_ids) - 1
+    n_seen = len(unique_task_ids) - n_unseen
 
-    unseen_task_ids = sorted(int(task_id) for task_id in shuffled_tasks[:n_unseen])
-    seen_task_ids = sorted(int(task_id) for task_id in shuffled_tasks[n_unseen:])
+    rng = np.random.RandomState(seed)
+    shuffled_tasks = list(task_id_order)
+    rng.shuffle(shuffled_tasks)
+    seen_task_ids = [int(task_id) for task_id in shuffled_tasks[:n_seen]]
+    unseen_task_ids = [int(task_id) for task_id in shuffled_tasks[n_seen:]]
     unseen_set = set(unseen_task_ids)
+    torch_generator = torch.Generator()
+    torch_generator.manual_seed(seed)
 
     train_indices: list[int] = []
     val_indices: list[int] = []
     test_indices: list[int] = []
     per_task_counts: dict[str, dict[str, int]] = {}
 
-    for task_id in unique_task_ids:
-        indices = [idx for idx, rollout_task_id in enumerate(task_ids) if rollout_task_id == task_id]
-        indices = [int(idx) for idx in rng.permutation(indices)]
+    for task_id in shuffled_tasks:
+        indices = [
+            idx
+            for idx, rollout_task_id in enumerate(task_ids)
+            if rollout_task_id == task_id
+        ]
         if task_id in unseen_set:
             test_indices.extend(indices)
             per_task_counts[str(task_id)] = {"train": 0, "val": 0, "test": len(indices)}
             continue
 
+        permuted_positions = torch.randperm(len(indices), generator=torch_generator)
+        indices = [int(indices[int(position)]) for position in permuted_positions]
         n_train = int(seen_train_ratio * len(indices))
         if len(indices) > 1:
             n_train = min(max(n_train, 1), len(indices) - 1)
@@ -223,10 +338,14 @@ def split_indices_by_task(
     }
     metadata = {
         "split_mode": "task",
+        "task_split_algorithm": "safe_repo_np_shuffle_seen_first",
         "unseen_task_ratio": unseen_task_ratio,
         "seen_train_ratio": seen_train_ratio,
+        "shuffled_task_ids": [int(task_id) for task_id in shuffled_tasks],
         "seen_task_ids": seen_task_ids,
         "unseen_task_ids": unseen_task_ids,
+        "seen_task_ids_sorted": sorted(seen_task_ids),
+        "unseen_task_ids_sorted": sorted(unseen_task_ids),
         "per_task_counts": per_task_counts,
     }
     return split, metadata
@@ -244,11 +363,14 @@ def labels_for_dataset(dataset: OpenVLARolloutDataset) -> list[int]:
 def make_loaders(
     root: Path,
     layers: tuple[int, ...],
+    token_pool: str,
     split: dict[str, list[int]],
     batch_size: int,
     num_workers: int,
 ) -> tuple[OpenVLARolloutDataset, dict[str, DataLoader]]:
-    dataset = OpenVLARolloutDataset(root, layers=layers, token_pool="last", recursive=True)
+    dataset = OpenVLARolloutDataset(
+        root, layers=layers, token_pool=token_pool, recursive=True
+    )
     loaders = {
         name: DataLoader(
             Subset(dataset, indices),
@@ -261,6 +383,39 @@ def make_loaders(
         if indices
     }
     return dataset, loaders
+
+
+def class_weights_for_split(
+    dataset: OpenVLARolloutDataset, indices: list[int]
+) -> tuple[float, float]:
+    """Return SAFE-style `(failure_weight, success_weight)` for a training split."""
+
+    if not indices:
+        return (1.0, 1.0)
+
+    n_success = 0
+    for idx in indices:
+        info = dataset.rollouts[idx]
+        artifact = dataset._load_pickle(info.path)
+        n_success += int(dataset._read_success(artifact, info))
+    n_total = len(indices)
+    n_failure = n_total - n_success
+
+    freq_failure = (n_failure + 1) / n_total
+    freq_success = (n_success + 1) / n_total
+    return (1.0 / freq_failure, 1.0 / freq_success)
+
+
+def regularization_loss(model: torch.nn.Module, lambda_reg: float) -> torch.Tensor:
+    """SAFE-style L2 regularization over non-bias parameters."""
+
+    if lambda_reg <= 0:
+        return next(model.parameters()).new_tensor(0.0)
+    reg = next(model.parameters()).new_tensor(0.0)
+    for name, param in model.named_parameters():
+        if "bias" not in name:
+            reg = reg + torch.sum(param**2)
+    return lambda_reg * reg
 
 
 def build_model(
@@ -280,7 +435,9 @@ def build_model(
             n_layers=2,
             dropout=dropout,
             cumsum=True,
+            n_history_steps=exp.n_history_steps,
             loss_type="safe",
+            use_threshold=False,
         )
     elif exp.model_type == "lstm":
         model = SafeLSTMModel(
@@ -289,6 +446,7 @@ def build_model(
             n_layers=1,
             dropout=dropout,
             loss_type="bce",
+            use_threshold=False,
         )
     elif exp.model_type == "layer_mix":
         model = LayerMixLSTMModel(
@@ -334,14 +492,16 @@ def init_wandb_run(
             "Install it or run through uv with `--with wandb`."
         ) from exc
 
-    base_config = {key: sanitize_config_value(value) for key, value in vars(args).items()}
+    base_config = {
+        key: sanitize_config_value(value) for key, value in vars(args).items()
+    }
     base_config.update(
         {
             "experiment": asdict(exp),
             "model_type": exp.model_type,
             "selected_layers": list(dataset.selected_layers),
             "saved_layers": list(dataset.saved_layers),
-            "token_pool": "last",
+            "token_pool": dataset.token_pool,
             "input_dim": dataset.input_dim,
             "hidden_dim_per_layer": dataset.hidden_dim,
             "n_rollouts": len(dataset),
@@ -374,37 +534,108 @@ def move_batch(batch: dict, device: torch.device) -> dict:
     return moved
 
 
-def masked_rollout_scores(scores: torch.Tensor, valid_masks: torch.Tensor) -> torch.Tensor:
+def masked_rollout_scores(
+    scores: torch.Tensor,
+    valid_masks: torch.Tensor,
+    stop_lengths: torch.Tensor | None = None,
+) -> torch.Tensor:
     scores = scores.squeeze(-1)
-    masked = scores.masked_fill(~valid_masks.bool(), float("-inf"))
+    mask = valid_masks.bool()
+    if stop_lengths is not None:
+        stop_lengths = stop_lengths.to(scores.device).clamp_min(1)
+        timesteps = torch.arange(scores.shape[1], device=scores.device)
+        stop_mask = timesteps.unsqueeze(0) < stop_lengths.unsqueeze(1)
+        mask = mask & stop_mask
+    masked = scores.masked_fill(~mask, float("-inf"))
     return masked.max(dim=1).values
 
 
+def ranking_metrics(labels: list[int], rollout_scores: list[float]) -> dict[str, float]:
+    if len(set(labels)) <= 1:
+        return {"roc_auc": float("nan"), "tpr_at_5_fpr": float("nan")}
+
+    roc_auc = float(roc_auc_score(labels, rollout_scores))
+    fpr, tpr, _ = roc_curve(labels, rollout_scores)
+    valid = np.where(fpr <= 0.05)[0]
+    tpr_at_5_fpr = float(tpr[valid].max()) if len(valid) else 0.0
+    return {"roc_auc": roc_auc, "tpr_at_5_fpr": tpr_at_5_fpr}
+
+
+def metadata_baselines_for_split(
+    dataset: OpenVLARolloutDataset, indices: list[int]
+) -> dict[str, float | int | bool]:
+    labels: list[int] = []
+    lengths: list[float] = []
+    progress_ratios: list[float] = []
+    task_min_steps: list[float] = []
+
+    for idx in indices:
+        info = dataset.rollouts[idx]
+        artifact = dataset._load_pickle(info.path)
+        success = dataset._read_success(artifact, info)
+        task_id = dataset._read_task_id(artifact, info)
+        length = int(artifact["hidden_states"].shape[0])
+        task_min_step = dataset._task_min_step(task_id, length)
+
+        labels.append(int(not success))
+        lengths.append(float(length))
+        progress_ratios.append(float(length / max(task_min_step, 1)))
+        task_min_steps.append(float(task_min_step))
+
+    def auc(values: list[float]) -> float:
+        if len(set(labels)) <= 1:
+            return float("nan")
+        return float(roc_auc_score(labels, values))
+
+    length_auc = auc(lengths)
+    return {
+        "n_rollouts": len(indices),
+        "n_failed": int(sum(labels)),
+        "n_success": int(len(labels) - sum(labels)),
+        "length_only_roc_auc": length_auc,
+        "progress_ratio_roc_auc": auc(progress_ratios),
+        "task_min_step_roc_auc": auc(task_min_steps),
+        "length_leakage_flag": bool(np.isfinite(length_auc) and length_auc >= 0.99),
+    }
+
+
 @torch.no_grad()
-def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> dict[str, float]:
+def evaluate(
+    model: torch.nn.Module, loader: DataLoader, device: torch.device
+) -> dict[str, float]:
     model.eval()
     losses = []
     labels = []
-    rollout_scores = []
+    early_rollout_scores = []
+    end_rollout_scores = []
     for batch in loader:
         batch = move_batch(batch, device)
         loss, _ = model.forward_loss(batch)
         scores = model(batch)
         losses.append(float(loss.detach().cpu()))
         labels.extend(batch["labels"].detach().cpu().int().tolist())
-        rollout_scores.extend(
+        early_rollout_scores.extend(
+            masked_rollout_scores(
+                scores, batch["valid_masks"], batch.get("task_min_steps")
+            )
+            .detach()
+            .cpu()
+            .tolist()
+        )
+        end_rollout_scores.extend(
             masked_rollout_scores(scores, batch["valid_masks"]).detach().cpu().tolist()
         )
 
     metrics = {"loss": float(np.mean(losses)) if losses else float("nan")}
-    if len(set(labels)) > 1:
-        metrics["roc_auc"] = float(roc_auc_score(labels, rollout_scores))
-        fpr, tpr, _ = roc_curve(labels, rollout_scores)
-        valid = np.where(fpr <= 0.05)[0]
-        metrics["tpr_at_5_fpr"] = float(tpr[valid].max()) if len(valid) else 0.0
-    else:
-        metrics["roc_auc"] = float("nan")
-        metrics["tpr_at_5_fpr"] = float("nan")
+    early_metrics = ranking_metrics(labels, early_rollout_scores)
+    end_metrics = ranking_metrics(labels, end_rollout_scores)
+    metrics["falert_early_roc_auc"] = early_metrics["roc_auc"]
+    metrics["falert_early_tpr_at_5_fpr"] = early_metrics["tpr_at_5_fpr"]
+    metrics["falert_end_roc_auc"] = end_metrics["roc_auc"]
+    metrics["falert_end_tpr_at_5_fpr"] = end_metrics["tpr_at_5_fpr"]
+    # Backward-compatible primary metrics now match SAFE's earliest-stop setting.
+    metrics["roc_auc"] = early_metrics["roc_auc"]
+    metrics["tpr_at_5_fpr"] = early_metrics["tpr_at_5_fpr"]
     return metrics
 
 
@@ -418,10 +649,16 @@ def train_one_experiment(
     dataset, loaders = make_loaders(
         root=root,
         layers=exp.layers,
+        token_pool=exp.token_pool,
         split=split,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
+    metadata_baselines = {
+        name: metadata_baselines_for_split(dataset, indices)
+        for name, indices in split.items()
+        if indices
+    }
     model = build_model(
         exp=exp,
         dataset=dataset,
@@ -430,7 +667,22 @@ def train_one_experiment(
         dropout=args.dropout,
         device=device,
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    lr = exp.lr if exp.lr is not None else args.lr
+    lambda_reg = exp.lambda_reg if exp.lambda_reg is not None else args.lambda_reg
+    class_weights = class_weights_for_split(dataset, split["train"])
+    class_weights = (
+        class_weights[0] * args.lambda_fail,
+        class_weights[1] * args.lambda_success,
+    )
+
+    if args.optimizer == "adam":
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    elif args.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=lr, weight_decay=args.weight_decay
+        )
+    else:
+        raise ValueError(f"Unsupported optimizer={args.optimizer!r}")
     wandb_run = init_wandb_run(args, exp, dataset, split)
 
     best_val = float("inf")
@@ -444,20 +696,29 @@ def train_one_experiment(
         for batch in loaders["train"]:
             batch = move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
-            loss, _ = model.forward_loss(batch)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            loss, _ = model.forward_loss(batch, weights=class_weights)
+            reg_loss = regularization_loss(model, lambda_reg)
+            total_loss = loss + reg_loss
+            total_loss.backward()
+            if args.grad_clip and args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
-            train_losses.append(float(loss.detach().cpu()))
+            train_losses.append(float(total_loss.detach().cpu()))
 
-        val_metrics = evaluate(model, loaders["val"], device) if "val" in loaders else {"loss": float("nan")}
+        val_metrics = (
+            evaluate(model, loaders["val"], device)
+            if "val" in loaders
+            else {"loss": float("nan")}
+        )
         train_loss = float(np.mean(train_losses)) if train_losses else float("nan")
         val_loss = val_metrics["loss"]
         improved = val_loss < best_val
         if improved:
             best_val = val_loss
             best_epoch = epoch
-            best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+            best_state = {
+                key: value.detach().cpu() for key, value in model.state_dict().items()
+            }
             patience_left = args.patience
         else:
             patience_left -= 1
@@ -467,7 +728,8 @@ def train_one_experiment(
                 f"{exp.name} epoch={epoch:03d} "
                 f"train_loss={train_loss:.4f} "
                 f"val_loss={val_metrics['loss']:.4f} "
-                f"val_auc={val_metrics.get('roc_auc', float('nan')):.4f}"
+                f"val_falert_early_auc={val_metrics.get('roc_auc', float('nan')):.4f} "
+                f"val_falert_end_auc={val_metrics.get('falert_end_roc_auc', float('nan')):.4f}"
             )
 
         if wandb_run is not None:
@@ -477,40 +739,142 @@ def train_one_experiment(
                 "val/loss": val_metrics["loss"],
                 "val/roc_auc": val_metrics.get("roc_auc", float("nan")),
                 "val/tpr_at_5_fpr": val_metrics.get("tpr_at_5_fpr", float("nan")),
+                "val/falert_early_roc_auc": val_metrics.get(
+                    "falert_early_roc_auc", float("nan")
+                ),
+                "val/falert_early_tpr_at_5_fpr": val_metrics.get(
+                    "falert_early_tpr_at_5_fpr", float("nan")
+                ),
+                "val/falert_end_roc_auc": val_metrics.get(
+                    "falert_end_roc_auc", float("nan")
+                ),
+                "val/falert_end_tpr_at_5_fpr": val_metrics.get(
+                    "falert_end_tpr_at_5_fpr", float("nan")
+                ),
+                "model/lr": lr,
+                "model/lambda_reg": lambda_reg,
+                "train/class_weight_failure": class_weights[0],
+                "train/class_weight_success": class_weights[1],
             }
             if isinstance(model, LayerMixLSTMModel):
-                for layer, weight in zip(dataset.selected_layers, model.layer_weights.cpu().tolist()):
+                for layer, weight in zip(
+                    dataset.selected_layers, model.layer_weights.cpu().tolist()
+                ):
                     log_payload[f"layer_weights/layer_{layer}"] = weight
             wandb_run.log(log_payload, step=epoch)
 
-        if patience_left <= 0:
+        if not args.no_early_stopping and patience_left <= 0:
             break
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    test_metrics = evaluate(model, loaders["test"], device) if "test" in loaders else {"loss": float("nan")}
-    val_metrics = evaluate(model, loaders["val"], device) if "val" in loaders else {"loss": float("nan")}
+    test_metrics = (
+        evaluate(model, loaders["test"], device)
+        if "test" in loaders
+        else {"loss": float("nan")}
+    )
+    val_metrics = (
+        evaluate(model, loaders["val"], device)
+        if "val" in loaders
+        else {"loss": float("nan")}
+    )
+    safe_paper_roc_auc = SAFE_OPENVLA_LIBERO_UNSEEN_ROC_AUC.get(
+        exp.model_type, float("nan")
+    )
+    test_early_roc_auc = test_metrics.get("falert_early_roc_auc", float("nan"))
+    test_end_roc_auc = test_metrics.get("falert_end_roc_auc", float("nan"))
+    test_early_delta = (
+        test_early_roc_auc - safe_paper_roc_auc
+        if np.isfinite(test_early_roc_auc) and np.isfinite(safe_paper_roc_auc)
+        else float("nan")
+    )
+    test_end_delta = (
+        test_end_roc_auc - safe_paper_roc_auc
+        if np.isfinite(test_end_roc_auc) and np.isfinite(safe_paper_roc_auc)
+        else float("nan")
+    )
 
     result = {
         "name": exp.name,
         "model_type": exp.model_type,
         "layers": list(exp.layers),
+        "token_pool": dataset.token_pool,
         "input_dim": dataset.input_dim,
         "hidden_dim_per_layer": dataset.hidden_dim,
         "n_rollouts": len(dataset),
+        "lr": lr,
+        "lambda_reg": lambda_reg,
+        "seed": exp.seed if exp.seed is not None else args.seed,
+        "n_history_steps": exp.n_history_steps,
         "best_epoch": best_epoch,
         "val_loss": val_metrics["loss"],
         "val_roc_auc": val_metrics.get("roc_auc", float("nan")),
         "val_tpr_at_5_fpr": val_metrics.get("tpr_at_5_fpr", float("nan")),
+        "val_safe_early_stop_roc_auc": val_metrics.get(
+            "falert_early_roc_auc", float("nan")
+        ),
+        "val_full_rollout_roc_auc": val_metrics.get("falert_end_roc_auc", float("nan")),
+        "val_falert_early_roc_auc": val_metrics.get(
+            "falert_early_roc_auc", float("nan")
+        ),
+        "val_falert_early_tpr_at_5_fpr": val_metrics.get(
+            "falert_early_tpr_at_5_fpr", float("nan")
+        ),
+        "val_falert_end_roc_auc": val_metrics.get("falert_end_roc_auc", float("nan")),
+        "val_falert_end_tpr_at_5_fpr": val_metrics.get(
+            "falert_end_tpr_at_5_fpr", float("nan")
+        ),
         "test_loss": test_metrics["loss"],
         "test_roc_auc": test_metrics.get("roc_auc", float("nan")),
         "test_tpr_at_5_fpr": test_metrics.get("tpr_at_5_fpr", float("nan")),
+        "test_safe_early_stop_roc_auc": test_early_roc_auc,
+        "test_full_rollout_roc_auc": test_end_roc_auc,
+        "test_falert_early_roc_auc": test_metrics.get(
+            "falert_early_roc_auc", float("nan")
+        ),
+        "test_falert_early_tpr_at_5_fpr": test_metrics.get(
+            "falert_early_tpr_at_5_fpr", float("nan")
+        ),
+        "test_falert_end_roc_auc": test_metrics.get("falert_end_roc_auc", float("nan")),
+        "test_falert_end_tpr_at_5_fpr": test_metrics.get(
+            "falert_end_tpr_at_5_fpr", float("nan")
+        ),
+        "val_length_only_roc_auc": metadata_baselines.get("val", {}).get(
+            "length_only_roc_auc", float("nan")
+        ),
+        "val_progress_ratio_roc_auc": metadata_baselines.get("val", {}).get(
+            "progress_ratio_roc_auc", float("nan")
+        ),
+        "val_task_min_step_roc_auc": metadata_baselines.get("val", {}).get(
+            "task_min_step_roc_auc", float("nan")
+        ),
+        "val_length_leakage_flag": metadata_baselines.get("val", {}).get(
+            "length_leakage_flag", False
+        ),
+        "test_length_only_roc_auc": metadata_baselines.get("test", {}).get(
+            "length_only_roc_auc", float("nan")
+        ),
+        "test_progress_ratio_roc_auc": metadata_baselines.get("test", {}).get(
+            "progress_ratio_roc_auc", float("nan")
+        ),
+        "test_task_min_step_roc_auc": metadata_baselines.get("test", {}).get(
+            "task_min_step_roc_auc", float("nan")
+        ),
+        "test_length_leakage_flag": metadata_baselines.get("test", {}).get(
+            "length_leakage_flag", False
+        ),
+        "safe_paper_openvla_libero_unseen_roc_auc": safe_paper_roc_auc,
+        "test_safe_early_stop_delta_vs_safe_paper": test_early_delta,
+        "test_full_rollout_delta_vs_safe_paper": test_end_delta,
+        "metadata_baselines": metadata_baselines,
     }
     if isinstance(model, LayerMixLSTMModel):
         result["layer_weights"] = {
             str(layer): weight
-            for layer, weight in zip(dataset.selected_layers, model.layer_weights.cpu().tolist())
+            for layer, weight in zip(
+                dataset.selected_layers, model.layer_weights.cpu().tolist()
+            )
         }
 
     checkpoint_path = args.output_dir / f"{exp.name}.pt"
@@ -521,7 +885,10 @@ def train_one_experiment(
             "model_state_dict": model.state_dict(),
             "selected_layers": dataset.selected_layers,
             "saved_layers": dataset.saved_layers,
-            "token_pool": "last",
+            "token_pool": dataset.token_pool,
+            "lr": lr,
+            "lambda_reg": lambda_reg,
+            "n_history_steps": exp.n_history_steps,
         },
         checkpoint_path,
     )
@@ -534,9 +901,46 @@ def train_one_experiment(
                 "final/val_loss": result["val_loss"],
                 "final/val_roc_auc": result["val_roc_auc"],
                 "final/val_tpr_at_5_fpr": result["val_tpr_at_5_fpr"],
+                "final/val_safe_early_stop_roc_auc": result[
+                    "val_safe_early_stop_roc_auc"
+                ],
+                "final/val_full_rollout_roc_auc": result["val_full_rollout_roc_auc"],
+                "final/val_falert_early_roc_auc": result["val_falert_early_roc_auc"],
+                "final/val_falert_early_tpr_at_5_fpr": result[
+                    "val_falert_early_tpr_at_5_fpr"
+                ],
+                "final/val_falert_end_roc_auc": result["val_falert_end_roc_auc"],
+                "final/val_falert_end_tpr_at_5_fpr": result[
+                    "val_falert_end_tpr_at_5_fpr"
+                ],
                 "test/loss": result["test_loss"],
                 "test/roc_auc": result["test_roc_auc"],
                 "test/tpr_at_5_fpr": result["test_tpr_at_5_fpr"],
+                "test/safe_early_stop_roc_auc": result["test_safe_early_stop_roc_auc"],
+                "test/full_rollout_roc_auc": result["test_full_rollout_roc_auc"],
+                "test/falert_early_roc_auc": result["test_falert_early_roc_auc"],
+                "test/falert_early_tpr_at_5_fpr": result[
+                    "test_falert_early_tpr_at_5_fpr"
+                ],
+                "test/falert_end_roc_auc": result["test_falert_end_roc_auc"],
+                "test/falert_end_tpr_at_5_fpr": result["test_falert_end_tpr_at_5_fpr"],
+                "baseline/val_length_only_roc_auc": result["val_length_only_roc_auc"],
+                "baseline/val_progress_ratio_roc_auc": result[
+                    "val_progress_ratio_roc_auc"
+                ],
+                "baseline/test_length_only_roc_auc": result["test_length_only_roc_auc"],
+                "baseline/test_progress_ratio_roc_auc": result[
+                    "test_progress_ratio_roc_auc"
+                ],
+                "safe_paper/openvla_libero_unseen_roc_auc": result[
+                    "safe_paper_openvla_libero_unseen_roc_auc"
+                ],
+                "safe_paper/test_safe_early_stop_delta": result[
+                    "test_safe_early_stop_delta_vs_safe_paper"
+                ],
+                "safe_paper/test_full_rollout_delta": result[
+                    "test_full_rollout_delta_vs_safe_paper"
+                ],
             }
         )
         if args.wandb_log_checkpoints:
@@ -559,14 +963,42 @@ def write_results(results: list[dict[str, object]], output_dir: Path) -> None:
         "name",
         "model_type",
         "layers",
+        "token_pool",
         "input_dim",
+        "lr",
+        "lambda_reg",
+        "seed",
+        "n_history_steps",
         "best_epoch",
         "val_loss",
         "val_roc_auc",
         "val_tpr_at_5_fpr",
+        "val_safe_early_stop_roc_auc",
+        "val_full_rollout_roc_auc",
+        "val_falert_early_roc_auc",
+        "val_falert_early_tpr_at_5_fpr",
+        "val_falert_end_roc_auc",
+        "val_falert_end_tpr_at_5_fpr",
         "test_loss",
         "test_roc_auc",
         "test_tpr_at_5_fpr",
+        "test_safe_early_stop_roc_auc",
+        "test_full_rollout_roc_auc",
+        "test_falert_early_roc_auc",
+        "test_falert_early_tpr_at_5_fpr",
+        "test_falert_end_roc_auc",
+        "test_falert_end_tpr_at_5_fpr",
+        "val_length_only_roc_auc",
+        "val_progress_ratio_roc_auc",
+        "val_task_min_step_roc_auc",
+        "val_length_leakage_flag",
+        "test_length_only_roc_auc",
+        "test_progress_ratio_roc_auc",
+        "test_task_min_step_roc_auc",
+        "test_length_leakage_flag",
+        "safe_paper_openvla_libero_unseen_roc_auc",
+        "test_safe_early_stop_delta_vs_safe_paper",
+        "test_full_rollout_delta_vs_safe_paper",
         "checkpoint_path",
     ]
     with csv_path.open("w", newline="") as handle:
@@ -581,15 +1013,35 @@ def write_results(results: list[dict[str, object]], output_dir: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-    parser.add_argument("--output-dir", type=Path, default=Path("runs/openvla_ablation"))
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("runs/openvla_ablation")
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--token-pool", default="last", help="Action-token pooling for non-sweep runs."
+    )
+    parser.add_argument(
+        "--n-history-steps",
+        type=int,
+        default=1,
+        help="Causal history window for MLP inputs.",
+    )
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--optimizer", choices=["adam", "adamw"], default="adamw")
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--lambda-reg", type=float, default=0.0)
+    parser.add_argument("--lambda-success", type=float, default=1.0)
+    parser.add_argument("--lambda-fail", type=float, default=1.0)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--projection-dim", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=0.0,
+        help="Max gradient norm. Use 0 to disable clipping, matching SAFE defaults.",
+    )
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--train-frac", type=float, default=0.7)
     parser.add_argument("--val-frac", type=float, default=0.15)
@@ -614,14 +1066,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=5)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--wandb", action="store_true", help="Log training progress to Weights & Biases.")
-    parser.add_argument("--wandb-project", default="extend-safe", help="W&B project name.")
-    parser.add_argument("--wandb-entity", default=None, help="Optional W&B entity or team.")
-    parser.add_argument("--wandb-run-name", default=None, help="Optional base run name; experiment name is appended.")
-    parser.add_argument("--wandb-run-prefix", default="", help="Optional prefix for per-ablation W&B run names.")
-    parser.add_argument("--wandb-group", default=None, help="Shared W&B group for all ablation runs.")
-    parser.add_argument("--wandb-tags", nargs="*", default=[], help="Optional W&B tags.")
+    parser.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Log training progress to Weights & Biases.",
+    )
+    parser.add_argument(
+        "--wandb-project", default="extend-safe", help="W&B project name."
+    )
+    parser.add_argument(
+        "--wandb-rollout-project",
+        default="extend-safe-rollout",
+        help="W&B project used automatically for --safe-openvla-libero-sweep unless --wandb-project is overridden.",
+    )
+    parser.add_argument(
+        "--wandb-entity", default=None, help="Optional W&B entity or team."
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        default=None,
+        help="Optional base run name; experiment name is appended.",
+    )
+    parser.add_argument(
+        "--wandb-run-prefix",
+        default="",
+        help="Optional prefix for per-ablation W&B run names.",
+    )
+    parser.add_argument(
+        "--wandb-group", default=None, help="Shared W&B group for all ablation runs."
+    )
+    parser.add_argument(
+        "--wandb-tags", nargs="*", default=[], help="Optional W&B tags."
+    )
     parser.add_argument(
         "--wandb-mode",
         default="online",
@@ -648,66 +1127,194 @@ def parse_args() -> argparse.Namespace:
         type=parse_layers,
         help="Optional comma-separated layer list for one extra layer_mix_custom experiment.",
     )
+    parser.add_argument(
+        "--no-early-stopping",
+        action="store_true",
+        help="Train for all requested epochs, matching SAFE's fixed-epoch training loop.",
+    )
+    parser.add_argument(
+        "--safe-openvla-libero-sweep",
+        action="store_true",
+        help=(
+            "Run the SAFE OpenVLA LIBERO MLP/LSTM grid from submit_openvla_libero.bash: "
+            "seeds 0,1,2; token_idx_rel mean,0.0,1.0; lr 1e-4,3e-4,1e-3; "
+            "lambda_reg 1e-3,1e-2,1e-1,1; batch size 64; Adam."
+        ),
+    )
+    parser.add_argument("--sweep-seeds", type=parse_csv_ints, default=(0, 1, 2))
+    parser.add_argument(
+        "--sweep-token-pools", type=parse_csv_strings, default=("mean", "0.0", "1.0")
+    )
+    parser.add_argument(
+        "--sweep-lrs", type=parse_csv_floats, default=(1e-4, 3e-4, 1e-3)
+    )
+    parser.add_argument(
+        "--sweep-lambda-reg", type=parse_csv_floats, default=(1e-3, 1e-2, 1e-1, 1.0)
+    )
+    parser.add_argument(
+        "--sweep-models", type=parse_csv_strings, default=("lstm", "mlp")
+    )
+    parser.add_argument("--sweep-history-steps", type=parse_csv_ints, default=(1,))
+    parser.add_argument(
+        "--safe-sweep-epochs",
+        type=int,
+        default=50,
+        help="Epoch hard cap for the SAFE OpenVLA LIBERO sweep.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print resolved splits/experiments and exit.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    seed_everything(args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.safe_openvla_libero_sweep:
+        args.batch_size = 64
+        args.epochs = args.safe_sweep_epochs
+        args.optimizer = "adam"
+        if args.wandb_project == "extend-safe":
+            args.wandb_project = args.wandb_rollout_project
+
+    seed_everything(args.seed)
     if args.wandb and args.wandb_group is None:
-        args.wandb_group = f"openvla-ablation-{int(time.time())}"
+        group_prefix = (
+            "safe-openvla-libero"
+            if args.safe_openvla_libero_sweep
+            else "openvla-ablation"
+        )
+        args.wandb_group = f"{group_prefix}-{int(time.time())}"
 
     root = args.root.expanduser().resolve()
     device = torch.device(args.device)
 
     saved_layers = discover_saved_layers(root)
-    base_dataset = OpenVLARolloutDataset(root, layers=(saved_layers[-1],), token_pool="last", recursive=True)
-    if args.split_mode == "task":
-        split, split_metadata = split_indices_by_task(
-            base_dataset,
-            unseen_task_ratio=args.unseen_task_ratio,
-            seen_train_ratio=args.seen_train_ratio,
-            seed=args.seed,
+    base_dataset = OpenVLARolloutDataset(
+        root, layers=(saved_layers[-1],), token_pool="last", recursive=True
+    )
+
+    if args.safe_openvla_libero_sweep:
+        experiments = build_safe_openvla_libero_experiments(
+            saved_layers=saved_layers,
+            seeds=args.sweep_seeds,
+            token_pools=args.sweep_token_pools,
+            lrs=args.sweep_lrs,
+            lambda_regs=args.sweep_lambda_reg,
+            models=args.sweep_models,
+            history_steps=args.sweep_history_steps,
+        )
+        experiments = filter_experiments(
+            experiments,
+            include=set(args.only) if args.only else None,
+            skip_single_layer_sweep=False,
+        )
+        split_seeds = sorted(
+            {int(exp.seed) for exp in experiments if exp.seed is not None}
         )
     else:
-        labels = labels_for_dataset(base_dataset)
-        split = split_indices(labels, args.train_frac, args.val_frac, args.seed)
-        split_metadata = {
-            "split_mode": "random",
-            "train_frac": args.train_frac,
-            "val_frac": args.val_frac,
-            "test_frac": 1.0 - args.train_frac - args.val_frac,
-        }
-    with (args.output_dir / "split_indices.json").open("w") as handle:
-        json.dump(split, handle, indent=2)
-    with (args.output_dir / "split_metadata.json").open("w") as handle:
-        json.dump(split_metadata, handle, indent=2)
+        token_pool = normalize_token_pool(args.token_pool)
+        experiments = [
+            replace(
+                exp,
+                token_pool=token_pool,
+                seed=args.seed,
+                n_history_steps=args.n_history_steps,
+            )
+            for exp in build_default_experiments(saved_layers)
+        ]
+        if args.custom_layers is not None:
+            experiments.append(
+                Experiment(
+                    "layer_mix_custom",
+                    "layer_mix",
+                    args.custom_layers,
+                    token_pool=token_pool,
+                    seed=args.seed,
+                    n_history_steps=args.n_history_steps,
+                )
+            )
+        experiments = filter_experiments(
+            experiments,
+            include=set(args.only) if args.only else None,
+            skip_single_layer_sweep=args.skip_single_layer_sweep,
+        )
+        split_seeds = [args.seed]
 
-    experiments = build_default_experiments(saved_layers)
-    if args.custom_layers is not None:
-        experiments.append(Experiment("layer_mix_custom", "layer_mix", args.custom_layers))
-    experiments = filter_experiments(
-        experiments,
-        include=set(args.only) if args.only else None,
-        skip_single_layer_sweep=args.skip_single_layer_sweep,
-    )
+    splits: dict[int, dict[str, list[int]]] = {}
+    split_metadata_by_seed: dict[int, dict[str, object]] = {}
+    for split_seed in split_seeds:
+        if args.split_mode == "task":
+            split, split_metadata = split_indices_by_task(
+                base_dataset,
+                unseen_task_ratio=args.unseen_task_ratio,
+                seen_train_ratio=args.seen_train_ratio,
+                seed=split_seed,
+            )
+        else:
+            labels = labels_for_dataset(base_dataset)
+            split = split_indices(labels, args.train_frac, args.val_frac, split_seed)
+            split_metadata = {
+                "split_mode": "random",
+                "train_frac": args.train_frac,
+                "val_frac": args.val_frac,
+                "test_frac": 1.0 - args.train_frac - args.val_frac,
+            }
+
+        split_metadata["seed"] = split_seed
+        splits[split_seed] = split
+        split_metadata_by_seed[split_seed] = split_metadata
+
+        suffix = "" if len(split_seeds) == 1 else f"_seed{split_seed}"
+        with (args.output_dir / f"split_indices{suffix}.json").open("w") as handle:
+            json.dump(split, handle, indent=2)
+        with (args.output_dir / f"split_metadata{suffix}.json").open("w") as handle:
+            json.dump(split_metadata, handle, indent=2)
+
+    if len(split_seeds) > 1:
+        with (args.output_dir / "split_metadata_by_seed.json").open("w") as handle:
+            json.dump(split_metadata_by_seed, handle, indent=2)
 
     print(f"root={root}")
     print(f"saved_layers={saved_layers}")
-    print(f"token_pool=last")
-    print(f"split_metadata={split_metadata}")
-    print(f"split_sizes={ {name: len(idx) for name, idx in split.items()} }")
+    print(f"safe_openvla_libero_sweep={args.safe_openvla_libero_sweep}")
+    print(f"split_metadata_by_seed={split_metadata_by_seed}")
+    print(
+        f"split_sizes_by_seed={ {seed: {name: len(idx) for name, idx in split.items()} for seed, split in splits.items()} }"
+    )
+    print(f"wandb_project={args.wandb_project}")
+    print(f"wandb_group={args.wandb_group}")
     print(f"running {len(experiments)} experiments on {device}")
+    if args.dry_run:
+        for exp in experiments:
+            print(
+                f"dry_run {exp.name}: model={exp.model_type} layers={exp.layers} "
+                f"token_pool={exp.token_pool} seed={exp.seed} lr={exp.lr} "
+                f"lambda_reg={exp.lambda_reg} n_history_steps={exp.n_history_steps}"
+            )
+        return
 
     results = []
     for exp in experiments:
-        print(f"\n== {exp.name}: {exp.model_type}, layers={exp.layers} ==")
+        exp_seed = exp.seed if exp.seed is not None else args.seed
+        seed_everything(exp_seed)
+        split = splits[exp_seed]
+        print(
+            f"\n== {exp.name}: {exp.model_type}, layers={exp.layers}, "
+            f"token_pool={exp.token_pool}, seed={exp_seed}, lr={exp.lr}, "
+            f"lambda_reg={exp.lambda_reg}, n_history_steps={exp.n_history_steps} =="
+        )
         result = train_one_experiment(exp, root, split, args, device)
         results.append(result)
         print(
-            f"done {exp.name}: val_auc={result['val_roc_auc']:.4f} "
-            f"test_auc={result['test_roc_auc']:.4f} checkpoint={result['checkpoint_path']}"
+            f"done {exp.name}: val_falert_early_auc={result['val_roc_auc']:.4f} "
+            f"test_falert_early_auc={result['test_roc_auc']:.4f} "
+            f"test_falert_end_auc={result['test_falert_end_roc_auc']:.4f} "
+            f"test_length_only_auc={result['test_length_only_roc_auc']:.4f} "
+            f"checkpoint={result['checkpoint_path']}"
         )
 
     write_results(results, args.output_dir)

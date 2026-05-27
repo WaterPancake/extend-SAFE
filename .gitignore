@@ -1,0 +1,8 @@
+__pycache__/
+.DS_Store
+.env
+.venv
+env/
+venv/
+.hf_token
+.wandb_api_key

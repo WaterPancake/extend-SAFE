@@ -22,6 +22,7 @@ class SafeLSTMModel(BaseModel):
         running_mean: bool = False,
         loss_type: str = "bce",
         threshold: float = 1.0,
+        use_threshold: bool = False,
         use_time_weighting: bool = False,
     ) -> None:
         super().__init__(input_dim)
@@ -36,6 +37,7 @@ class SafeLSTMModel(BaseModel):
         self.running_mean = running_mean
         self.loss_type = loss_type
         self.threshold = threshold
+        self.use_threshold = use_threshold
         self.use_time_weighting = use_time_weighting
 
         lstm_dropout = dropout if n_layers > 1 else 0.0
@@ -78,6 +80,7 @@ class SafeLSTMModel(BaseModel):
                 scores,
                 batch,
                 threshold=self.threshold,
+                use_threshold=self.use_threshold,
                 use_time_weighting=self.use_time_weighting,
                 class_weights=class_weights,
             )

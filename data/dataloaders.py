@@ -72,6 +72,7 @@ class OpenVLARolloutDataset(Dataset):
             self.saved_layers.index(layer) for layer in self.selected_layers
         )
         self.input_dim = self._compute_input_dim()
+        self.task_min_steps = self._compute_task_min_steps()
 
         self._validate_artifact_schema(first, self.rollouts[0].path)
 
@@ -83,14 +84,19 @@ class OpenVLARolloutDataset(Dataset):
         artifact = self._load_pickle(info.path)
         hidden_states = self._extract_features(artifact, info.path)
         success = self._read_success(artifact, info)
+        task_id = self._read_task_id(artifact, info)
+        length = int(hidden_states.shape[0])
 
         return {
             "features": hidden_states,
             "label": torch.tensor(float(not success), dtype=torch.float32),
             "success": torch.tensor(float(success), dtype=torch.float32),
-            "length": torch.tensor(hidden_states.shape[0], dtype=torch.long),
+            "length": torch.tensor(length, dtype=torch.long),
+            "task_min_step": torch.tensor(
+                self._task_min_step(task_id, length), dtype=torch.long
+            ),
             "path": str(info.path),
-            "task_id": self._read_task_id(artifact, info),
+            "task_id": task_id,
             "episode_idx": self._read_episode_idx(artifact, info),
             "selected_layers": self.selected_layers,
             "saved_layers": tuple(self.saved_layers),
@@ -131,6 +137,27 @@ class OpenVLARolloutDataset(Dataset):
     def _peek_action_tokens(self) -> int:
         artifact = self._load_pickle(self.rollouts[0].path)
         return int(artifact["hidden_states"].shape[1])
+
+    def _compute_task_min_steps(self) -> dict[int, int]:
+        """Per-task min length over all rollouts (matches SAFE set_task_min_step)."""
+
+        task_min_steps: dict[int, int] = {}
+        for info in self.rollouts:
+            artifact = self._load_pickle(info.path)
+            self._validate_artifact_schema(artifact, info.path)
+            task_id = self._read_task_id(artifact, info)
+            if task_id is None:
+                continue
+            length = int(artifact["hidden_states"].shape[0])
+            current = task_min_steps.get(task_id)
+            if current is None or length < current:
+                task_min_steps[task_id] = length
+        return task_min_steps
+
+    def _task_min_step(self, task_id: int | None, length: int) -> int:
+        if task_id is None:
+            return length
+        return min(self.task_min_steps.get(task_id, length), length)
 
     def _validate_artifact_schema(self, artifact: dict[str, Any], path: Path) -> None:
         if "hidden_states" not in artifact:
@@ -264,6 +291,7 @@ def collate_rollouts(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "features": features,
         "valid_masks": valid_masks,
         "lengths": lengths,
+        "task_min_steps": torch.stack([item["task_min_step"] for item in batch]),
         "labels": torch.stack([item["label"] for item in batch]),
         "success": torch.stack([item["success"] for item in batch]),
         "paths": [item["path"] for item in batch],

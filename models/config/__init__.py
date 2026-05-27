@@ -34,8 +34,8 @@ class ModelConfig:
 class SafeMLPConfig(ModelConfig):
     name: str = "safe_mlp"
     n_layers: int = 2
-    cumsum: bool = True
-    loss_type: str = "safe"
+    cumsum: bool = False
+    loss_type: str = "bce"
     final_activation: str = "sigmoid"
 
 

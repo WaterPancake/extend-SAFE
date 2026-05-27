@@ -84,6 +84,7 @@ def safe_cumulative_loss(
     scores: torch.Tensor,
     batch: dict[str, torch.Tensor],
     threshold: float = 1.0,
+    use_threshold: bool = True,
     use_time_weighting: bool = False,
     class_weights: tuple[float, float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
@@ -100,7 +101,10 @@ def safe_cumulative_loss(
     weights = time_weights(valid_masks, use_time_weighting).to(scores)
 
     success_losses = F.relu(scores)
-    failure_losses = weights * F.relu(threshold - scores)
+    if use_threshold:
+        failure_losses = weights * F.relu(threshold - scores)
+    else:
+        failure_losses = weights * (-scores)
     losses = torch.where(failure_labels[:, None].bool(), failure_losses, success_losses)
     return aggregate_masked_loss(losses, valid_masks, failure_labels, class_weights)
 

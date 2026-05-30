@@ -47,10 +47,17 @@ class OpenVLARolloutDataset(Dataset):
         layers: Sequence[int] | None = None,
         token_pool: TokenPool = "mean",
         recursive: bool = True,
+        cache: bool = True,
     ) -> None:
         self.root = Path(root).expanduser()
         self.requested_layers = tuple(layers) if layers is not None else None
         self.token_pool = token_pool
+        # In-memory cache of fully-processed items, keyed by index. Rollout
+        # `.pkl`s are large and __getitem__ is called once per epoch, so without
+        # this every epoch re-reads and re-unpickles the whole dataset from disk
+        # (the training bottleneck). Cached tensors are never mutated downstream.
+        self._cache_enabled = cache
+        self._item_cache: dict[int, dict[str, Any]] = {}
 
         if token_pool not in {"mean", "first", "last", "first_last", "none"}:
             raise ValueError(f"Unsupported token_pool={token_pool!r}")
@@ -80,6 +87,11 @@ class OpenVLARolloutDataset(Dataset):
         return len(self.rollouts)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        if self._cache_enabled:
+            cached = self._item_cache.get(index)
+            if cached is not None:
+                return cached
+
         info = self.rollouts[index]
         artifact = self._load_pickle(info.path)
         hidden_states = self._extract_features(artifact, info.path)
@@ -87,7 +99,7 @@ class OpenVLARolloutDataset(Dataset):
         task_id = self._read_task_id(artifact, info)
         length = int(hidden_states.shape[0])
 
-        return {
+        item = {
             "features": hidden_states,
             "label": torch.tensor(float(not success), dtype=torch.float32),
             "success": torch.tensor(float(success), dtype=torch.float32),
@@ -101,6 +113,10 @@ class OpenVLARolloutDataset(Dataset):
             "selected_layers": self.selected_layers,
             "saved_layers": tuple(self.saved_layers),
         }
+
+        if self._cache_enabled:
+            self._item_cache[index] = item
+        return item
 
     def _extract_features(self, artifact: dict[str, Any], path: Path) -> torch.Tensor:
         self._validate_artifact_schema(artifact, path)

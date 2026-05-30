@@ -40,6 +40,26 @@ SAFE_OPENVLA_LIBERO_UNSEEN_ROC_AUC = {
     "lstm": 0.7247,
     "mlp": 0.7347,
 }
+# SAFE reports no openvla-mini number (different backbone, 896-d hidden, and
+# these rollouts are libero_90, not libero_10). We reuse the published SAFE
+# OpenVLA-LIBERO unseen ROC-AUCs as a rough cross-model yardstick so the delta
+# columns stay populated; treat the delta as indicative only, not an
+# apples-to-apples comparison.
+SAFE_OPENVLA_MINI_LIBERO_UNSEEN_ROC_AUC = {
+    "lstm": 0.7247,
+    "mlp": 0.7347,
+}
+
+
+def safe_paper_baseline(root: Path | str, model_type: str) -> float:
+    """Pick the SAFE reference ROC-AUC for the dataset under ``root``."""
+
+    table = (
+        SAFE_OPENVLA_MINI_LIBERO_UNSEEN_ROC_AUC
+        if "openvla-mini" in str(root)
+        else SAFE_OPENVLA_LIBERO_UNSEEN_ROC_AUC
+    )
+    return table.get(model_type, float("nan"))
 
 
 @dataclass(frozen=True)
@@ -159,10 +179,15 @@ def build_safe_openvla_libero_experiments(
     lambda_regs: tuple[float, ...],
     models: tuple[str, ...],
     history_steps: tuple[int, ...],
+    layers: tuple[int, ...] | None = None,
 ) -> list[Experiment]:
-    """Grid from SAFE's OpenVLA LIBERO batch-training script."""
+    """Grid from SAFE's OpenVLA LIBERO batch-training script.
 
-    final_layer = (saved_layers[-1],)
+    By default each experiment uses only the final saved layer (matching SAFE).
+    Pass ``layers`` to override (e.g. the last three captured layers).
+    """
+
+    final_layer = tuple(layers) if layers else (saved_layers[-1],)
     experiments: list[Experiment] = []
     for seed, token_pool_raw, lr, lambda_reg, model in product(
         seeds, token_pools, lrs, lambda_regs, models
@@ -779,9 +804,7 @@ def train_one_experiment(
         if "val" in loaders
         else {"loss": float("nan")}
     )
-    safe_paper_roc_auc = SAFE_OPENVLA_LIBERO_UNSEEN_ROC_AUC.get(
-        exp.model_type, float("nan")
-    )
+    safe_paper_roc_auc = safe_paper_baseline(dataset.root, exp.model_type)
     test_early_roc_auc = test_metrics.get("falert_early_roc_auc", float("nan"))
     test_end_roc_auc = test_metrics.get("falert_end_roc_auc", float("nan"))
     test_early_delta = (
@@ -1156,6 +1179,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--sweep-history-steps", type=parse_csv_ints, default=(1,))
     parser.add_argument(
+        "--sweep-layers",
+        type=parse_layers,
+        default=None,
+        help=(
+            "Override the layers used in the SAFE sweep (comma-separated model-layer "
+            "ids, e.g. 18,21,24). Defaults to the final saved layer only."
+        ),
+    )
+    parser.add_argument(
         "--safe-sweep-epochs",
         type=int,
         default=50,
@@ -1206,6 +1238,7 @@ def main() -> None:
             lambda_regs=args.sweep_lambda_reg,
             models=args.sweep_models,
             history_steps=args.sweep_history_steps,
+            layers=args.sweep_layers,
         )
         experiments = filter_experiments(
             experiments,

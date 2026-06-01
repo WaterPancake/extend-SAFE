@@ -200,10 +200,24 @@ def build_safe_openvla_libero_experiments(
         elif model_name in {"lstm", "safe_lstm"}:
             model_type = "lstm"
             model_tag = "safe_lstm"
+        elif model_name in {"linear_probe", "probe", "linear"}:
+            model_type = "linear_probe"
+            model_tag = "linear_probe"
+        elif model_name in {"layer_mix", "layermix", "mix"}:
+            model_type = "layer_mix"
+            model_tag = "layer_mix"
         else:
             raise ValueError(
-                f"Unsupported SAFE sweep model {model!r}; use lstm or mlp/indep"
+                f"Unsupported SAFE sweep model {model!r}; use "
+                "lstm, mlp/indep, linear_probe, or layer_mix"
             )
+
+        # layer_mix learns a weighted mix, so it needs >1 layer; default to all
+        # captured layers unless an explicit multi-layer set was given.
+        if model_type == "layer_mix":
+            exp_layers = final_layer if len(final_layer) > 1 else tuple(saved_layers)
+        else:
+            exp_layers = final_layer
 
         model_history_steps = history_steps if model_type == "mlp" else (1,)
         for n_history_steps in model_history_steps:
@@ -216,7 +230,7 @@ def build_safe_openvla_libero_experiments(
                 Experiment(
                     name=name,
                     model_type=model_type,
-                    layers=final_layer,
+                    layers=exp_layers,
                     token_pool=token_pool,
                     lr=lr,
                     lambda_reg=lambda_reg,
@@ -385,6 +399,31 @@ def labels_for_dataset(dataset: OpenVLARolloutDataset) -> list[int]:
     return labels
 
 
+# Memoize datasets by (root, layers, token_pool, cache) so a single-process
+# grid (many experiments sharing the same feature view) only reads/unpickles the
+# rollouts once. The populated in-memory cache is then reused across every
+# experiment with that layer/token combo -- the difference between 1 disk pass
+# and one-per-cell. Splits vary per seed but only via the Subset wrapper, so the
+# underlying dataset object is safe to share.
+_DATASET_CACHE: dict[tuple, OpenVLARolloutDataset] = {}
+
+
+def get_dataset(
+    root: Path,
+    layers: tuple[int, ...],
+    token_pool: str,
+    cache: bool = True,
+) -> OpenVLARolloutDataset:
+    key = (str(root), tuple(layers), token_pool, cache)
+    dataset = _DATASET_CACHE.get(key)
+    if dataset is None:
+        dataset = OpenVLARolloutDataset(
+            root, layers=layers, token_pool=token_pool, recursive=True, cache=cache
+        )
+        _DATASET_CACHE[key] = dataset
+    return dataset
+
+
 def make_loaders(
     root: Path,
     layers: tuple[int, ...],
@@ -392,10 +431,9 @@ def make_loaders(
     split: dict[str, list[int]],
     batch_size: int,
     num_workers: int,
+    cache: bool = True,
 ) -> tuple[OpenVLARolloutDataset, dict[str, DataLoader]]:
-    dataset = OpenVLARolloutDataset(
-        root, layers=layers, token_pool=token_pool, recursive=True
-    )
+    dataset = get_dataset(root, layers, token_pool, cache)
     loaders = {
         name: DataLoader(
             Subset(dataset, indices),
@@ -678,6 +716,7 @@ def train_one_experiment(
         split=split,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        cache=not args.no_cache,
     )
     metadata_baselines = {
         name: metadata_baselines_for_split(dataset, indices)
@@ -1042,6 +1081,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help=(
+            "Disable in-memory feature caching. The cache makes repeat-epoch "
+            "access ~instant but holds every selected layer for all rollouts in "
+            "RAM (layer_mix over all 9 OpenVLA layers is ~38 GB). Use on "
+            "low-memory hosts to trade speed for footprint."
+        ),
+    )
+    parser.add_argument(
         "--token-pool", default="last", help="Action-token pooling for non-sweep runs."
     )
     parser.add_argument(
@@ -1225,8 +1274,10 @@ def main() -> None:
     device = torch.device(args.device)
 
     saved_layers = discover_saved_layers(root)
-    base_dataset = OpenVLARolloutDataset(
-        root, layers=(saved_layers[-1],), token_pool="last", recursive=True
+    # Route through the memo so the split-computation pass is reused by any
+    # experiment that also uses the last layer with last-token pooling.
+    base_dataset = get_dataset(
+        root, layers=(saved_layers[-1],), token_pool="last", cache=not args.no_cache
     )
 
     if args.safe_openvla_libero_sweep:

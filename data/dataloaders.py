@@ -90,7 +90,9 @@ class OpenVLARolloutDataset(Dataset):
         if self._cache_enabled:
             cached = self._item_cache.get(index)
             if cached is not None:
-                return cached
+                item = dict(cached)
+                item["features"] = item["features"].to(torch.float32)
+                return item
 
         info = self.rollouts[index]
         artifact = self._load_pickle(info.path)
@@ -115,7 +117,13 @@ class OpenVLARolloutDataset(Dataset):
         }
 
         if self._cache_enabled:
-            self._item_cache[index] = item
+            # Cache features in bf16 (their on-disk source dtype, so lossless) to
+            # halve cache RAM: the all-9-layer OpenVLA cache drops ~33GB -> ~17GB,
+            # fitting modest container limits. Returned features are always upcast
+            # to fp32, so models/collate/training are unchanged.
+            cache_item = dict(item)
+            cache_item["features"] = item["features"].to(torch.bfloat16)
+            self._item_cache[index] = cache_item
         return item
 
     def _extract_features(self, artifact: dict[str, Any], path: Path) -> torch.Tensor:

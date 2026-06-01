@@ -19,13 +19,18 @@
 #   model  in {linear_probe, layer_mix}  (2)
 #   => 3*3*4*3 = 108 cells per model, 216 total.
 #
-# MEMORY: the dataset caches every SELECTED layer for all 500 rollouts in RAM.
-#   linear_probe (1 layer) ~ 4 GB;  layer_mix (all 9 layers) ~ 38 GB.
-#   On a host with < ~48 GB RAM, either set NO_CACHE=1 (slower: re-reads pkls
-#   every epoch) or shrink layer_mix's footprint with LAYERS (see below).
+# EXECUTION: one python process per (model, token) -- it sweeps all lr x lambda
+#   x seed in a single run, so the 94 GB of rollouts is read & cached ONCE per
+#   token and reused across its 36 cells, instead of re-reading per cell.
 #
-# Resumable: each cell writes <out>/<exp>.pt only after it finishes; re-running
-#   the script skips finished cells, so a preempted spot instance just re-runs.
+# MEMORY: the dataset caches every SELECTED layer for all 500 rollouts in RAM,
+#   in bf16. linear_probe (1 layer) ~ 2 GB; layer_mix (all 9 layers) ~ 17 GB.
+#   On a RAM-capped host (e.g. a ~47 GiB RunPod container) layer_mix fits with
+#   headroom. If still tight: NO_CACHE=1 (slow: re-reads pkls every epoch) or
+#   shrink layer_mix's footprint with LAYERS (see below).
+#
+# Resumable per (model, token): a token whose 36 checkpoints all exist is
+#   skipped; an interrupted token re-runs its cells (cheap -- cache is warm).
 #
 # RunPod setup (once):
 #   pip install -r requirements.txt
@@ -97,37 +102,54 @@ echo
 cache_flag=(); [[ "${NO_CACHE}" == "1" ]] && cache_flag=(--no-cache)
 layers_flag=(); [[ -n "${LAYERS}" ]] && layers_flag=(--sweep-layers "${LAYERS}")
 
-failed=(); skipped=(); ran=(); idx=0
+# Join a space-separated list into a comma list for the python sweep flags.
+csv() { local IFS=,; echo "$*"; }
+
+# One python PROCESS per (model, token): it sweeps all lr x lambda x seed in a
+# single run, so the 94 GB of rollouts is read/cached ONCE per token and reused
+# across all its cells -- instead of re-reading per cell. Resume granularity is
+# therefore per (model, token): a token whose checkpoints are all present is
+# skipped; an interrupted token re-runs its cells (cheap, cache is warm).
+cells_per_group=0
+for lr in ${LRS}; do for reg in ${LAMBDAS}; do for s in ${SEEDS}; do
+  cells_per_group=$((cells_per_group+1)); done; done; done
+n_groups=0
+for m in ${MODELS}; do for t in ${TOKENS}; do n_groups=$((n_groups+1)); done; done
+echo "running ${n_groups} per-token processes x ${cells_per_group} cells = ${total} cells"
+echo "(one rollout read per (model,token); cache reused across its cells)"
+echo
+
+failed=(); skipped=(); ran=(); gidx=0
 
 for model in ${MODELS}; do
   outdir="$(outdir_for "${model}")"
   mkdir -p "${outdir}"
-  for tok in ${TOKENS}; do for lr in ${LRS}; do for reg in ${LAMBDAS}; do for seed in ${SEEDS}; do
-    idx=$((idx+1))
-    exp="$(expname_for "${model}" "${tok}" "${lr}" "${reg}" "${seed}")"
-    ckpt="${outdir}/${exp}.pt"
-    prefix="[${idx}/${total}]"
+  group="${model}-openvla-layers-${EPOCHS}ep"
+  for tok in ${TOKENS}; do
+    gidx=$((gidx+1))
+    toktag="$(toktag_for "${tok}")"
+    prefix="[group ${gidx}/${n_groups}]"
+    have=$(find "${outdir}" -maxdepth 1 -name "${model}_tok-${toktag}_*.pt" 2>/dev/null | wc -l | tr -d ' ')
 
-    if [[ "${FORCE}" != "1" && -f "${ckpt}" ]]; then
-      echo ">>> ${prefix} SKIP (exists): ${exp}"; skipped+=("${exp}"); continue
+    if [[ "${FORCE}" != "1" && "${have}" -ge "${cells_per_group}" ]]; then
+      echo ">>> ${prefix} SKIP ${model}/${tok} (${have}/${cells_per_group} done)"; skipped+=("${model}/${tok}"); continue
     fi
     if [[ "${DRY}" == "1" ]]; then
-      echo ">>> ${prefix} DRY: ${exp}"; continue
+      echo ">>> ${prefix} DRY ${model}/${tok}: ${cells_per_group} cells (have ${have})"; continue
     fi
 
-    echo ">>> ${prefix} RUN: ${exp}  ->  ${outdir}"
-    group="${model}-openvla-layers-${EPOCHS}ep"
-    log="${outdir}/train_${exp}.log"
+    echo ">>> ${prefix} RUN ${model}/${tok}: ${cells_per_group} cells (have ${have})  ->  ${outdir}"
+    log="${outdir}/train_${model}_tok-${toktag}.log"
 
     "${PY}" scripts/train_openvla_ablation.py \
       --root "${ROOT}" \
       --safe-openvla-libero-sweep \
       --safe-sweep-epochs "${EPOCHS}" \
       --no-early-stopping \
-      --sweep-seeds "${seed}" \
+      --sweep-seeds "$(csv ${SEEDS})" \
       --sweep-token-pools "${tok}" \
-      --sweep-lrs "${lr}" \
-      --sweep-lambda-reg "${reg}" \
+      --sweep-lrs "$(csv ${LRS})" \
+      --sweep-lambda-reg "$(csv ${LAMBDAS})" \
       --sweep-models "${model}" \
       --hidden-dim "${HIDDEN}" \
       --device "${DEVICE}" \
@@ -138,11 +160,12 @@ for model in ${MODELS}; do
       2>&1 | tee "${log}"
 
     status="${PIPESTATUS[0]}"
+    now=$(find "${outdir}" -maxdepth 1 -name "${model}_tok-${toktag}_*.pt" 2>/dev/null | wc -l | tr -d ' ')
     if [[ "${status}" -ne 0 ]]; then
-      echo "!!! ${prefix} FAILED (exit ${status}): ${exp} -- re-run script to retry" >&2; failed+=("${exp}")
-    elif [[ -f "${ckpt}" ]]; then ran+=("${exp}")
-    else echo "!!! ${prefix} WARNING: exit 0 but no checkpoint at ${ckpt}" >&2; failed+=("${exp}"); fi
-  done; done; done; done
+      echo "!!! ${prefix} FAILED (exit ${status}): ${model}/${tok} (${now}/${cells_per_group}) -- re-run to resume" >&2; failed+=("${model}/${tok}")
+    elif [[ "${now}" -ge "${cells_per_group}" ]]; then ran+=("${model}/${tok}")
+    else echo "!!! ${prefix} PARTIAL: ${model}/${tok} (${now}/${cells_per_group}) -- re-run to finish" >&2; failed+=("${model}/${tok}"); fi
+  done
 done
 
 echo

@@ -212,10 +212,13 @@ def build_safe_openvla_libero_experiments(
                 "lstm, mlp/indep, linear_probe, or layer_mix"
             )
 
-        # layer_mix learns a weighted mix, so it needs >1 layer; default to all
-        # captured layers unless an explicit multi-layer set was given.
+        # layer_mix learns a weighted mix over its captured layers. With no
+        # explicit override it defaults to ALL captured layers (the layer-
+        # importance readout). An explicit `layers` override is honored as-is --
+        # even a single layer, which yields a degenerate 1-way mix (just the
+        # projection+LSTM on that layer), useful as a last-layer-only baseline.
         if model_type == "layer_mix":
-            exp_layers = final_layer if len(final_layer) > 1 else tuple(saved_layers)
+            exp_layers = tuple(layers) if layers else tuple(saved_layers)
         else:
             exp_layers = final_layer
 

@@ -6,3 +6,18 @@ env/
 venv/
 .hf_token
 .wandb_api_key
+
+# Local editor/agent settings
+.claude/settings.local.json
+**/.claude/settings.local.json
+AGENT.local.md
+
+# Generated experiment outputs
+runs/
+wandb/
+
+# Generated rollout/data artifacts
+# Keep this scoped to known output directories instead of ignoring all JSON/CSV globally.
+data/rollouts/**
+data/openVLA_rollout_video/**
+data/visualization/**

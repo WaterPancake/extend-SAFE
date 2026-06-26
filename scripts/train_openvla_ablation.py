@@ -32,7 +32,14 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
 
 from data.dataloaders import OpenVLARolloutDataset, collate_rollouts
-from models import LayerMixLSTMModel, LinearProbeModel, SafeLSTMModel, SafeMLPModel
+from models import (
+    LayerMixLSTMModel,
+    LayerTokenTransformerLSTMModel,
+    LinearProbeModel,
+    SafeLSTMModel,
+    SafeMLPModel,
+    SparseLayerMixLSTMModel,
+)
 
 
 DEFAULT_ROOT = Path("data/rollouts/openvla")
@@ -141,6 +148,10 @@ def build_default_experiments(saved_layers: tuple[int, ...]) -> list[Experiment]
         Experiment("linear_probe_all_captured", "linear_probe", saved_layers),
         Experiment("layer_mix_late", "layer_mix", late_layers),
         Experiment("layer_mix_all_captured", "layer_mix", saved_layers),
+        Experiment("sparse_layer_mix_late", "sparse_layer_mix", late_layers),
+        Experiment("sparse_layer_mix_all_captured", "sparse_layer_mix", saved_layers),
+        Experiment("layer_token_encoder_late", "layer_token", late_layers),
+        Experiment("layer_token_encoder_all_captured", "layer_token", saved_layers),
     ]
     experiments.extend(
         Experiment(f"linear_probe_layer_{layer}", "linear_probe", (layer,))
@@ -206,18 +217,22 @@ def build_safe_openvla_libero_experiments(
         elif model_name in {"layer_mix", "layermix", "mix"}:
             model_type = "layer_mix"
             model_tag = "layer_mix"
+        elif model_name in {"sparse_layer_mix", "sparse_layermix", "sparse_mix"}:
+            model_type = "sparse_layer_mix"
+            model_tag = "sparse_layer_mix"
+        elif model_name in {"layer_token", "layer_tokens", "layer_token_encoder", "token_as_layer"}:
+            model_type = "layer_token"
+            model_tag = "layer_token"
         else:
             raise ValueError(
                 f"Unsupported SAFE sweep model {model!r}; use "
-                "lstm, mlp/indep, linear_probe, or layer_mix"
+                "lstm, mlp/indep, linear_probe, layer_mix, sparse_layer_mix, or layer_token"
             )
 
-        # layer_mix learns a weighted mix over its captured layers. With no
-        # explicit override it defaults to ALL captured layers (the layer-
-        # importance readout). An explicit `layers` override is honored as-is --
-        # even a single layer, which yields a degenerate 1-way mix (just the
-        # projection+LSTM on that layer), useful as a last-layer-only baseline.
-        if model_type == "layer_mix":
+        # Layer-relationship models operate over multiple captured layers. With
+        # no explicit override they default to ALL captured layers. An explicit
+        # `layers` override is honored as-is.
+        if model_type in {"layer_mix", "sparse_layer_mix", "layer_token"}:
             exp_layers = tuple(layers) if layers else tuple(saved_layers)
         else:
             exp_layers = final_layer
@@ -312,8 +327,16 @@ def split_indices_by_task(
     unseen_task_ratio: float,
     seen_train_ratio: float,
     seed: int,
+    held_out_tasks: list[int] | None = None,
 ) -> tuple[dict[str, list[int]], dict[str, object]]:
-    """SAFE repo split: shuffle task IDs, hold out unseen tasks, split seen rollouts."""
+    """SAFE repo split: shuffle task IDs, hold out unseen tasks, split seen rollouts.
+
+    When ``held_out_tasks`` is given, those exact task IDs become the unseen
+    (test) set and ``unseen_task_ratio`` is ignored for selection -- this is the
+    leave-one-task-out (LOTO) mode. ``seed`` still controls the train/val shuffle
+    of the seen rollouts, so a fixed seed across folds isolates the held-out-task
+    effect.
+    """
 
     if not 0.0 <= unseen_task_ratio < 1.0:
         raise ValueError("unseen_task_ratio must be in [0, 1)")
@@ -326,19 +349,30 @@ def split_indices_by_task(
     if len(unique_task_ids) < 2:
         raise ValueError("Task-level split requires at least two task IDs")
 
-    n_unseen = round(unseen_task_ratio * len(unique_task_ids))
-    if unseen_task_ratio > 0 and n_unseen == 0:
-        n_unseen = 1
-    if n_unseen >= len(unique_task_ids):
-        n_unseen = len(unique_task_ids) - 1
-    n_seen = len(unique_task_ids) - n_unseen
-
     rng = np.random.RandomState(seed)
     shuffled_tasks = list(task_id_order)
     rng.shuffle(shuffled_tasks)
-    seen_task_ids = [int(task_id) for task_id in shuffled_tasks[:n_seen]]
-    unseen_task_ids = [int(task_id) for task_id in shuffled_tasks[n_seen:]]
-    unseen_set = set(unseen_task_ids)
+
+    if held_out_tasks is not None:
+        held = [int(t) for t in held_out_tasks]
+        missing = [t for t in held if t not in unique_task_ids]
+        if missing:
+            raise ValueError(f"held_out_tasks {missing} not in dataset tasks {unique_task_ids}")
+        if not 0 < len(held) < len(unique_task_ids):
+            raise ValueError("held_out_tasks must hold out between 1 and n-1 tasks")
+        unseen_set = set(held)
+        seen_task_ids = [int(t) for t in shuffled_tasks if int(t) not in unseen_set]
+        unseen_task_ids = [int(t) for t in shuffled_tasks if int(t) in unseen_set]
+    else:
+        n_unseen = round(unseen_task_ratio * len(unique_task_ids))
+        if unseen_task_ratio > 0 and n_unseen == 0:
+            n_unseen = 1
+        if n_unseen >= len(unique_task_ids):
+            n_unseen = len(unique_task_ids) - 1
+        n_seen = len(unique_task_ids) - n_unseen
+        seen_task_ids = [int(task_id) for task_id in shuffled_tasks[:n_seen]]
+        unseen_task_ids = [int(task_id) for task_id in shuffled_tasks[n_seen:]]
+        unseen_set = set(unseen_task_ids)
     torch_generator = torch.Generator()
     torch_generator.manual_seed(seed)
 
@@ -516,6 +550,26 @@ def build_model(
         )
     elif exp.model_type == "layer_mix":
         model = LayerMixLSTMModel(
+            input_dim=dataset.input_dim,
+            n_layers=len(dataset.selected_layers),
+            hidden_dim_per_layer=dataset.hidden_dim,
+            projection_dim=projection_dim,
+            lstm_hidden_dim=hidden_dim,
+            dropout=dropout,
+            loss_type="bce",
+        )
+    elif exp.model_type == "sparse_layer_mix":
+        model = SparseLayerMixLSTMModel(
+            input_dim=dataset.input_dim,
+            n_layers=len(dataset.selected_layers),
+            hidden_dim_per_layer=dataset.hidden_dim,
+            projection_dim=projection_dim,
+            lstm_hidden_dim=hidden_dim,
+            dropout=dropout,
+            loss_type="bce",
+        )
+    elif exp.model_type == "layer_token":
+        model = LayerTokenTransformerLSTMModel(
             input_dim=dataset.input_dim,
             n_layers=len(dataset.selected_layers),
             hidden_dim_per_layer=dataset.hidden_dim,
@@ -752,24 +806,55 @@ def train_one_experiment(
         raise ValueError(f"Unsupported optimizer={args.optimizer!r}")
     wandb_run = init_wandb_run(args, exp, dataset, split)
 
+    progress_path = args.output_dir / f"{exp.name}.progress.pt"
     best_val = float("inf")
     best_state = None
     best_epoch = 0
     patience_left = args.patience
+    start_epoch = 1
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume_progress and progress_path.exists():
+        progress = torch.load(progress_path, map_location=device, weights_only=False)
+        completed_epoch = int(progress.get("epoch", 0))
+        if completed_epoch >= args.epochs:
+            print(
+                f"ignoring stale complete progress checkpoint for {exp.name}: "
+                f"epoch={completed_epoch}"
+            )
+        else:
+            model.load_state_dict(progress["model_state_dict"])
+            optimizer.load_state_dict(progress["optimizer_state_dict"])
+            best_state = progress.get("best_state_dict")
+            best_val = float(progress.get("best_val", best_val))
+            best_epoch = int(progress.get("best_epoch", best_epoch))
+            patience_left = int(progress.get("patience_left", patience_left))
+            start_epoch = completed_epoch + 1
+            print(
+                f"resumed {exp.name} from {progress_path} "
+                f"at epoch={completed_epoch}; continuing at epoch={start_epoch}"
+            )
+
+    accumulation_steps = max(1, int(args.gradient_accumulation_steps))
+
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         train_losses = []
-        for batch in loaders["train"]:
+        optimizer.zero_grad(set_to_none=True)
+        total_train_batches = len(loaders["train"])
+        for batch_idx, batch in enumerate(loaders["train"], start=1):
             batch = move_batch(batch, device)
-            optimizer.zero_grad(set_to_none=True)
             loss, _ = model.forward_loss(batch, weights=class_weights)
             reg_loss = regularization_loss(model, lambda_reg)
             total_loss = loss + reg_loss
-            total_loss.backward()
-            if args.grad_clip and args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            optimizer.step()
+            group_start = ((batch_idx - 1) // accumulation_steps) * accumulation_steps + 1
+            group_end = min(group_start + accumulation_steps - 1, total_train_batches)
+            group_size = group_end - group_start + 1
+            (total_loss / group_size).backward()
+            if batch_idx % accumulation_steps == 0 or batch_idx == total_train_batches:
+                if args.grad_clip and args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
             train_losses.append(float(total_loss.detach().cpu()))
 
         val_metrics = (
@@ -823,12 +908,44 @@ def train_one_experiment(
                 "train/class_weight_failure": class_weights[0],
                 "train/class_weight_success": class_weights[1],
             }
-            if isinstance(model, LayerMixLSTMModel):
+            if hasattr(model, "layer_weights"):
                 for layer, weight in zip(
                     dataset.selected_layers, model.layer_weights.cpu().tolist()
                 ):
                     log_payload[f"layer_weights/layer_{layer}"] = weight
             wandb_run.log(log_payload, step=epoch)
+
+        if (
+            args.progress_save_every > 0
+            and (epoch % args.progress_save_every == 0 or epoch == args.epochs)
+        ):
+            tmp_progress_path = progress_path.with_suffix(
+                progress_path.suffix + ".tmp"
+            )
+            torch.save(
+                {
+                    "experiment": asdict(exp),
+                    "epoch": epoch,
+                    "epochs": args.epochs,
+                    "model_state_dict": {
+                        key: value.detach().cpu()
+                        for key, value in model.state_dict().items()
+                    },
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "best_state_dict": best_state,
+                    "best_val": best_val,
+                    "best_epoch": best_epoch,
+                    "patience_left": patience_left,
+                    "selected_layers": dataset.selected_layers,
+                    "saved_layers": dataset.saved_layers,
+                    "token_pool": dataset.token_pool,
+                    "lr": lr,
+                    "lambda_reg": lambda_reg,
+                    "n_history_steps": exp.n_history_steps,
+                },
+                tmp_progress_path,
+            )
+            tmp_progress_path.replace(progress_path)
 
         if not args.no_early_stopping and patience_left <= 0:
             break
@@ -934,7 +1051,7 @@ def train_one_experiment(
         "test_full_rollout_delta_vs_safe_paper": test_end_delta,
         "metadata_baselines": metadata_baselines,
     }
-    if isinstance(model, LayerMixLSTMModel):
+    if hasattr(model, "layer_weights"):
         result["layer_weights"] = {
             str(layer): weight
             for layer, weight in zip(
@@ -948,6 +1065,11 @@ def train_one_experiment(
             "experiment": asdict(exp),
             "result": result,
             "model_state_dict": model.state_dict(),
+            # The exact rollout indices this model was trained/evaluated with.
+            # Downstream consumers (conformal sweeps, score analyses) must use
+            # this rather than split_indices_*.json files, which can go stale
+            # when a sweep directory mixes checkpoints from several invocations.
+            "split": {name: [int(i) for i in indices] for name, indices in split.items()},
             "selected_layers": dataset.selected_layers,
             "saved_layers": dataset.saved_layers,
             "token_pool": dataset.token_pool,
@@ -958,6 +1080,7 @@ def train_one_experiment(
         checkpoint_path,
     )
     result["checkpoint_path"] = str(checkpoint_path)
+    progress_path.unlink(missing_ok=True)
 
     if wandb_run is not None:
         wandb_run.log(
@@ -1084,6 +1207,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=1,
+        help="Accumulate gradients over N dataloader batches before optimizer.step().",
+    )
+    parser.add_argument(
         "--no-cache",
         action="store_true",
         help=(
@@ -1188,6 +1317,23 @@ def parse_args() -> argparse.Namespace:
         help="Log model checkpoints as W&B artifacts.",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Retrain experiments even if the final checkpoint already exists.",
+    )
+    parser.add_argument(
+        "--resume-progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Resume from per-experiment .progress.pt checkpoints when present.",
+    )
+    parser.add_argument(
+        "--progress-save-every",
+        type=int,
+        default=5,
+        help="Save a resumable .progress.pt checkpoint every N epochs. Use 0 to disable.",
+    )
+    parser.add_argument(
         "--only",
         nargs="*",
         help="Run only these experiment names. By default, runs the full ablation set.",
@@ -1246,6 +1392,12 @@ def parse_args() -> argparse.Namespace:
         help="Epoch hard cap for the SAFE OpenVLA LIBERO sweep.",
     )
     parser.add_argument(
+        "--safe-sweep-batch-size",
+        type=int,
+        default=64,
+        help="Batch size for --safe-openvla-libero-sweep. Default matches SAFE.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print resolved splits/experiments and exit.",
@@ -1258,7 +1410,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.safe_openvla_libero_sweep:
-        args.batch_size = 64
+        args.batch_size = args.safe_sweep_batch_size
         args.epochs = args.safe_sweep_epochs
         args.optimizer = "adam"
         if args.wandb_project == "extend-safe":
@@ -1387,6 +1539,17 @@ def main() -> None:
     results = []
     for exp in experiments:
         exp_seed = exp.seed if exp.seed is not None else args.seed
+        checkpoint_path = args.output_dir / f"{exp.name}.pt"
+        if checkpoint_path.exists() and not args.force:
+            checkpoint = torch.load(
+                checkpoint_path, map_location="cpu", weights_only=False
+            )
+            result = dict(checkpoint["result"])
+            result["checkpoint_path"] = str(checkpoint_path)
+            results.append(result)
+            print(f"\n== {exp.name}: SKIP existing checkpoint={checkpoint_path} ==")
+            continue
+
         seed_everything(exp_seed)
         split = splits[exp_seed]
         print(

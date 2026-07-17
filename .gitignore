@@ -7,10 +7,6 @@ venv/
 .hf_token
 .wandb_api_key
 
-# Local editor/agent settings
-.claude/settings.local.json
-**/.claude/settings.local.json
-AGENT.local.md
 
 # Generated experiment outputs
 runs/
@@ -21,3 +17,4 @@ wandb/
 data/rollouts/**
 data/openVLA_rollout_video/**
 data/visualization/**
+docs/results_audit/**

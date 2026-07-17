@@ -57,6 +57,30 @@ SAFE_OPENVLA_MINI_LIBERO_UNSEEN_ROC_AUC = {
     "mlp": 0.7347,
 }
 
+SAFE_OPTIMAL_LR = 1e-4
+SAFE_OPTIMAL_LAMBDA_REG_BY_MODEL = {
+    "mlp": 1e-2,
+    "lstm": 1.0,
+    # LSTM-like layer-fusion models use the LSTM prior unless explicitly swept.
+    "layer_mix": 1.0,
+    "sparse_layer_mix": 1.0,
+    "layer_token": 1.0,
+    # Keep the historical linear-probe default at reg=1 for checkpoint-name compatibility.
+    "linear_probe": 1.0,
+}
+
+
+def default_lambda_reg_for_model(model_type: str) -> float:
+    return SAFE_OPTIMAL_LAMBDA_REG_BY_MODEL.get(model_type, 1.0)
+
+
+def resolve_lambda_reg(model_type: str, exp_value: float | None, cli_value: float | None) -> float:
+    if exp_value is not None:
+        return exp_value
+    if cli_value is not None:
+        return cli_value
+    return default_lambda_reg_for_model(model_type)
+
 
 def safe_paper_baseline(root: Path | str, model_type: str) -> float:
     """Pick the SAFE reference ROC-AUC for the dataset under ``root``."""
@@ -789,7 +813,7 @@ def train_one_experiment(
         device=device,
     )
     lr = exp.lr if exp.lr is not None else args.lr
-    lambda_reg = exp.lambda_reg if exp.lambda_reg is not None else args.lambda_reg
+    lambda_reg = resolve_lambda_reg(exp.model_type, exp.lambda_reg, args.lambda_reg)
     class_weights = class_weights_for_split(dataset, split["train"])
     class_weights = (
         class_weights[0] * args.lambda_fail,
@@ -1231,10 +1255,18 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Causal history window for MLP inputs.",
     )
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=SAFE_OPTIMAL_LR)
     parser.add_argument("--optimizer", choices=["adam", "adamw"], default="adamw")
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--lambda-reg", type=float, default=0.0)
+    parser.add_argument(
+        "--lambda-reg",
+        type=float,
+        default=None,
+        help=(
+            "Override L2 regularization. By default this is model-aware: "
+            "MLP=1e-2, LSTM=1, layer-fusion/linear defaults=1."
+        ),
+    )
     parser.add_argument("--lambda-success", type=float, default=1.0)
     parser.add_argument("--lambda-fail", type=float, default=1.0)
     parser.add_argument("--hidden-dim", type=int, default=256)
@@ -1531,8 +1563,10 @@ def main() -> None:
         for exp in experiments:
             print(
                 f"dry_run {exp.name}: model={exp.model_type} layers={exp.layers} "
-                f"token_pool={exp.token_pool} seed={exp.seed} lr={exp.lr} "
-                f"lambda_reg={exp.lambda_reg} n_history_steps={exp.n_history_steps}"
+                f"token_pool={exp.token_pool} seed={exp.seed} "
+                f"lr={exp.lr if exp.lr is not None else args.lr} "
+                f"lambda_reg={resolve_lambda_reg(exp.model_type, exp.lambda_reg, args.lambda_reg)} "
+                f"n_history_steps={exp.n_history_steps}"
             )
         return
 
@@ -1554,8 +1588,10 @@ def main() -> None:
         split = splits[exp_seed]
         print(
             f"\n== {exp.name}: {exp.model_type}, layers={exp.layers}, "
-            f"token_pool={exp.token_pool}, seed={exp_seed}, lr={exp.lr}, "
-            f"lambda_reg={exp.lambda_reg}, n_history_steps={exp.n_history_steps} =="
+            f"token_pool={exp.token_pool}, seed={exp_seed}, "
+            f"lr={exp.lr if exp.lr is not None else args.lr}, "
+            f"lambda_reg={resolve_lambda_reg(exp.model_type, exp.lambda_reg, args.lambda_reg)}, "
+            f"n_history_steps={exp.n_history_steps} =="
         )
         result = train_one_experiment(exp, root, split, args, device)
         results.append(result)

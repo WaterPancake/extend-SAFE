@@ -6,9 +6,9 @@ This is a focused follow-up to ``train_openvla_ablation.py``:
 2. rank layers by validation metric,
 3. train SAFE LSTMs on concatenated top-k layer features.
 
-Defaults use the current best LSTM hyperparameters from the OpenVLA sweep:
-last action token, lr=1e-4, lambda_reg=1, SAFE-style task holdout, Adam, and
-fixed-epoch training.
+Defaults use the SAFE paper selection-table hyperparameters from the OpenVLA sweep:
+last action token, lr=1e-4, model-aware lambda_reg (MLP=1e-2, LSTM=1),
+SAFE-style task holdout, Adam, and fixed-epoch training.
 """
 
 from __future__ import annotations
@@ -52,6 +52,17 @@ from train_openvla_ablation import (
 
 
 DEFAULT_RANKING_METRIC = "val_falert_early_roc_auc"
+DEFAULT_LR = 1e-4
+DEFAULT_LAMBDA_REG_BY_MODEL = {
+    "mlp": 1e-2,
+    "lstm": 1.0,
+    # Keep historical linear-probe checkpoint tags compatible unless overridden.
+    "linear_probe": 1.0,
+}
+
+
+def default_lambda_reg_for_model(model_type: str) -> float:
+    return DEFAULT_LAMBDA_REG_BY_MODEL.get(model_type, 1.0)
 
 
 def parse_args() -> argparse.Namespace:
@@ -150,8 +161,13 @@ def parse_args() -> argparse.Namespace:
         default="last",
         help="Action-token pooling. Default: last.",
     )
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--lambda-reg", type=float, default=1.0)
+    parser.add_argument("--lr", type=float, default=DEFAULT_LR)
+    parser.add_argument(
+        "--lambda-reg",
+        type=float,
+        default=None,
+        help="Override regularization. Default is model-aware: MLP=1e-2, LSTM=1.",
+    )
     parser.add_argument("--lambda-success", type=float, default=1.0)
     parser.add_argument("--lambda-fail", type=float, default=1.0)
     parser.add_argument("--optimizer", choices=["adam", "adamw"], default="adam")
@@ -227,7 +243,10 @@ def parse_args() -> argparse.Namespace:
         choices=["online", "offline", "disabled"],
     )
     parser.add_argument("--wandb-log-checkpoints", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.lambda_reg is None:
+        args.lambda_reg = default_lambda_reg_for_model(args.model_type)
+    return args
 
 
 def experiment_name(prefix: str, layers: Iterable[int], args: argparse.Namespace) -> str:

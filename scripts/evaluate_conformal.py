@@ -242,6 +242,7 @@ def functional_cp_thresholds(
     test_rollouts: list[RolloutScores],
     alpha: float,
     seed: int,
+    horizon: int | None = None,
 ) -> tuple[np.ndarray, dict[str, int | float | str]]:
     """SAFE functional CP upper band calibrated on successful rollouts.
 
@@ -257,7 +258,16 @@ def functional_cp_thresholds(
             "Functional CP needs at least one successful calibration rollout"
         )
 
-    max_length = max(rollout.length for rollout in calibration + test_rollouts)
+    # Threshold construction must not depend on held-out rollout lengths. The
+    # calibration split normally contains timeout failures and therefore spans
+    # the benchmark horizon; callers may pass an explicit known horizon.
+    max_length = (
+        int(horizon)
+        if horizon is not None
+        else max(rollout.length for rollout in calibration)
+    )
+    if max_length <= 0:
+        raise ValueError(f"Functional CP horizon must be positive, got {max_length}")
     cal_success = extend_scores(success_rollouts, max_length)
     if len(cal_success) == 1:
         cal_scores_1 = cal_success
@@ -288,6 +298,7 @@ def functional_cp_thresholds(
         "regression_calibration_count": int(len(cal_scores_1)),
         "modulation_calibration_count": int(len(cal_scores_2)),
         "threshold_length": int(len(thresholds)),
+        "horizon_source": "explicit" if horizon is not None else "calibration",
         "band_width": band_width,
     }
 

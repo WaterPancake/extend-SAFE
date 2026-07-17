@@ -47,6 +47,14 @@ from data.dataloaders import OpenVLARolloutDataset, collate_rollouts
 from models import LinearProbeModel, SafeMLPModel
 
 ABS_TIMESTEPS = [5, 10, 20, 30, 40, 60, 80, 120, 160]
+DEFAULT_REG_TAG_BY_MODEL = {
+    "mlp": "0.01",
+    "linear_probe": "1",
+}
+
+
+def default_reg_tag(model_type: str) -> str:
+    return DEFAULT_REG_TAG_BY_MODEL[model_type]
 
 
 def build_probe(model_type: str) -> torch.nn.Module:
@@ -79,19 +87,25 @@ def main() -> None:
     parser.add_argument("--layers", type=int, nargs="+", default=[1, 4, 8, 12, 16, 20, 24, 28, 32])
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--token-pool", default="last")
+    parser.add_argument(
+        "--reg-tag",
+        default=None,
+        help="lambda_reg tag in checkpoint filenames. Default is model-aware: MLP=0.01, linear=1.",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     args = parser.parse_args()
 
     device = torch.device(args.device)
     args.output.mkdir(parents=True, exist_ok=True)
+    reg_tag = args.reg_tag if args.reg_tag is not None else default_reg_tag(args.model_type)
 
     models, splits, stored_auc = {}, {}, {}
     for layer in args.layers:
         for seed in args.seeds:
             name = (
                 f"safe_{args.model_type}_single_layers_{layer}"
-                f"_tok-{args.token_pool}_lr-0.0001_reg-1_seed-{seed}"
+                f"_tok-{args.token_pool}_lr-0.0001_reg-{reg_tag}_seed-{seed}"
             )
             ckpt = torch.load(
                 args.checkpoint_dir / f"{name}.pt", map_location="cpu", weights_only=False

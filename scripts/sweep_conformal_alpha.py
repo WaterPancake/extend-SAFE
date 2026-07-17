@@ -147,7 +147,17 @@ def evaluate_checkpoint_alphas(
         dropout=args.dropout,
     )
 
-    split = load_split(split_path)
+    # Prefer the split embedded in the checkpoint (the indices the model was
+    # actually trained/evaluated with). split_indices_*.json files can go
+    # stale when a sweep directory mixes outputs from several invocations.
+    if "split" in checkpoint:
+        split = checkpoint["split"]
+    else:
+        split = load_split(split_path)
+        print(
+            f"warning: {checkpoint_path.name} has no embedded split; "
+            f"falling back to {split_path} (verify it matches training)"
+        )
     val_scores = collect_scores(
         model, dataset, split["val"], args.batch_size, args.num_workers, device
     )

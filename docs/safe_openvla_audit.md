@@ -511,11 +511,9 @@ A credible multitask VLA failure-detection result should report:
 - `task_min_step` is benchmark-compatible but retrospective. A
   deployment claim needs fixed, predeclared horizons or online stopping
   rules.
-- The predeclared 50/100/148-step sensitivity and public per-timestep
-  score bundle for the primary 1,000-rollout MLP/LSTM analysis are
-  closeout requirements but are not present in this release candidate.
-  The second full-rate layer-32 shard is staged and validated; the first
-  survives only in stride-4 form. The secondary 1,000-rollout layer-20
+- The predeclared 50/100/148-step fixed-horizon sensitivity and the public
+  per-timestep score bundle for the primary 1,000-rollout MLP/LSTM analysis
+  are included. The secondary 1,000-rollout layer-20
   follow-up includes stride-adjusted versions of those fixed horizons,
   but its newly trained dynamic models and stride-4 inputs cannot
   substitute for the finalized primary probes.

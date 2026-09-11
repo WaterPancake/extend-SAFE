@@ -77,11 +77,9 @@ format.
 ## Project status
 
 The main scientific conclusion is stable at the scope above, and open
-limitations and non-goals are recorded in the report. This checkout is still a
-release candidate: the second full-rate layer-32 shard is now staged and
-validated, but publication closeout still requires restoring the first
-full-rate shard, generating the public score bundle, and running the
-predeclared 50/100/148-step sensitivity. Compact existing result tables live
+limitations and non-goals are recorded in the report. The public score bundle
+replays the original and fixed-horizon functional-CP analyses; the
+predeclared 50/100/148-step sensitivity is included. Compact result tables live
 under `docs/results_audit/`; raw rollouts, checkpoints, and development runs are
 intentionally excluded.
 

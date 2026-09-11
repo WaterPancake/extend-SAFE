@@ -1,0 +1,420 @@
+{
+  "schema_version": 2,
+  "created_at_utc": "2026-09-11T22:13:15.136568+00:00",
+  "purpose": "Replay LOTO ranking and functional conformal evaluation",
+  "path_policy": "root aliases and relative paths only; no absolute source paths",
+  "score_dtype": "float32",
+  "record_count": 9200,
+  "score_value_count": 3612694,
+  "unique_rollout_count": 1000,
+  "models": [
+    "lstm",
+    "mlp"
+  ],
+  "folds_by_model": {
+    "mlp": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "lstm": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ]
+  },
+  "included_split_roles": [
+    "val",
+    "test"
+  ],
+  "source_root_aliases": {
+    "root-0": "openVLA-last-layer",
+    "root-1": "openVLA-last-layer-2"
+  },
+  "source_preparation_manifests": {
+    "root-0": {
+      "file": "manifest.json",
+      "file_sha256": "9200514cf529fd23d0e71b1a236a69a817af03a19222d1dffa96e75a9a2a0fa1",
+      "canonical_sha256": "21ee3ac9466c9899fb199a9d1ead86329bbbb87f9829b8e5b21fecf558629281",
+      "manifest": {
+        "input_root": "data/processed/shard1",
+        "output_root": "data/processed/primary_l32/openVLA-last-layer",
+        "source_rollouts": 500,
+        "written": 500,
+        "skipped_existing": 0,
+        "corrupt_source_artifacts": [],
+        "layers": [
+          32
+        ],
+        "token_index": -1,
+        "temporal_stride": 1,
+        "source_inventory_sha256": "6c5c83dd120f3bed450207ab161aa49e65aa8f6a141091080dcbeb9be31b8cb2",
+        "output_audit": {
+          "rollouts": 500,
+          "task_counts": {
+            "0": 50,
+            "1": 50,
+            "2": 50,
+            "3": 50,
+            "4": 50,
+            "5": 50,
+            "6": 50,
+            "7": 50,
+            "8": 50,
+            "9": 50
+          },
+          "episode_coverage": {
+            "0": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "1": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "2": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "3": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "4": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "5": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "6": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "7": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "8": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "9": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            }
+          },
+          "outcome_counts": {
+            "task0_success0": 19,
+            "task0_success1": 31,
+            "task1_success0": 12,
+            "task1_success1": 38,
+            "task2_success0": 24,
+            "task2_success1": 26,
+            "task3_success0": 27,
+            "task3_success1": 23,
+            "task4_success0": 28,
+            "task4_success1": 22,
+            "task5_success0": 8,
+            "task5_success1": 42,
+            "task6_success0": 22,
+            "task6_success1": 28,
+            "task7_success0": 20,
+            "task7_success1": 30,
+            "task8_success0": 36,
+            "task8_success1": 14,
+            "task9_success0": 31,
+            "task9_success1": 19
+          },
+          "minimum_length": 148,
+          "maximum_length": 520,
+          "homogeneous_schema": true,
+          "source_action_token_index_counts": {
+            "6": 500
+          },
+          "schemas": [
+            {
+              "count": 500,
+              "layers": [
+                32
+              ],
+              "hidden_dim_per_layer": 4096,
+              "hidden_ndim": 3,
+              "hidden_shape_suffix": [
+                1,
+                4096
+              ],
+              "temporal_stride": 1,
+              "hidden_state_layout": "action_token_axis_then_concatenated_selected_layers"
+            }
+          ],
+          "inventory_sha256": "6150143c6523c7565899dca850289d7d79def3ea1441745237902a49b384b1b9"
+        }
+      }
+    },
+    "root-1": {
+      "file": "manifest.json",
+      "file_sha256": "25adca08df6141e010a182460d0d164d0520aa9ad721eb995cf31920499a382c",
+      "canonical_sha256": "dce4f56b847e564e4b180ceba133819f325c9ea19049b9342da5d3154ad1377d",
+      "manifest": {
+        "input_root": "data/processed/OpenVLA_500_2",
+        "output_root": "data/processed/primary_l32/openVLA-last-layer-2",
+        "source_rollouts": 500,
+        "written": 500,
+        "skipped_existing": 0,
+        "corrupt_source_artifacts": [],
+        "layers": [
+          32
+        ],
+        "token_index": -1,
+        "temporal_stride": 1,
+        "source_inventory_sha256": "7268e6bb2aae10bb17dc6d7415db8d0c632f8ef142aa1fdea5c6aaae486adab8",
+        "output_audit": {
+          "rollouts": 500,
+          "task_counts": {
+            "0": 50,
+            "1": 50,
+            "2": 50,
+            "3": 50,
+            "4": 50,
+            "5": 50,
+            "6": 50,
+            "7": 50,
+            "8": 50,
+            "9": 50
+          },
+          "episode_coverage": {
+            "0": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "1": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "2": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "3": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "4": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "5": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "6": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "7": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "8": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            },
+            "9": {
+              "minimum": 0,
+              "maximum": 49,
+              "unique_count": 50
+            }
+          },
+          "outcome_counts": {
+            "task0_success0": 20,
+            "task0_success1": 30,
+            "task1_success0": 15,
+            "task1_success1": 35,
+            "task2_success0": 29,
+            "task2_success1": 21,
+            "task3_success0": 25,
+            "task3_success1": 25,
+            "task4_success0": 34,
+            "task4_success1": 16,
+            "task5_success0": 9,
+            "task5_success1": 41,
+            "task6_success0": 24,
+            "task6_success1": 26,
+            "task7_success0": 17,
+            "task7_success1": 33,
+            "task8_success0": 40,
+            "task8_success1": 10,
+            "task9_success0": 33,
+            "task9_success1": 17
+          },
+          "minimum_length": 148,
+          "maximum_length": 520,
+          "homogeneous_schema": true,
+          "source_action_token_index_counts": {
+            "-1": 500
+          },
+          "schemas": [
+            {
+              "count": 500,
+              "layers": [
+                32
+              ],
+              "hidden_dim_per_layer": 4096,
+              "hidden_ndim": 3,
+              "hidden_shape_suffix": [
+                1,
+                4096
+              ],
+              "temporal_stride": 1,
+              "hidden_state_layout": "action_token_axis_then_concatenated_selected_layers"
+            }
+          ],
+          "inventory_sha256": "2a65f8db489b3f76c5715821a005ff2f6649dfdf47166e946cdf57a6cf227bf3"
+        }
+      }
+    }
+  },
+  "source_inventory_sha256": "70af9585c6717285310c74270333899ae684131fe8254c4a68a8bba3ef09be28",
+  "checkpoint_manifest": {
+    "lstm": {
+      "0": {
+        "file": "safe_lstm_single_layers_32_tok-last_lr-0.0001_reg-1_seed-0.pt",
+        "sha256": "73f2572e5fc154eaa9dbcb42d7682f180c2021511f15f534ed0c12c66766275b"
+      },
+      "1": {
+        "file": "safe_lstm_single_layers_32_tok-last_lr-0.0001_reg-1_seed-1.pt",
+        "sha256": "37a95894bb9b93ef7ac67042beaa66ffef34d4accba3f939772e1d6c9b829580"
+      },
+      "2": {
+        "file": "safe_lstm_single_layers_32_tok-last_lr-0.0001_reg-1_seed-2.pt",
+        "sha256": "582b9209f9d6525eb6db9a3b777cf7d4b798731defe697255595d3a5629ca33a"
+      },
+      "3": {
+        "file": "safe_lstm_single_layers_32_tok-last_lr-0.0001_reg-1_seed-3.pt",
+        "sha256": "4aa56f2c56957e8202fbab8a98df51050b81a5358ffe2f9cc06c700f6841038e"
+      },
+      "4": {
+        "file": "safe_lstm_single_layers_32_tok-last_lr-0.0001_reg-1_seed-4.pt",
+        "sha256": "8812876351edfd66fc5288f1ed2f0315df53f3eba5917281c5de24fa1c1addcb"
+      },
+      "5": {
+        "file": "safe_lstm_single_layers_32_tok-last_lr-0.0001_reg-1_seed-5.pt",
+        "sha256": "3f732cd11f964508f2ebb357a4db8fb57023974fbcf3b5ca2669f90e9f9a568e"
+      },
+      "6": {
+        "file": "safe_lstm_single_layers_32_tok-last_lr-0.0001_reg-1_seed-6.pt",
+        "sha256": "19680cfc9c9a731b3ae2a4b68d3f04e5a3f5469d5cefa77692edbbf5736d579a"
+      },
+      "7": {
+        "file": "safe_lstm_single_layers_32_tok-last_lr-0.0001_reg-1_seed-7.pt",
+        "sha256": "6076f0cdefce476c30ac328221b86381338b17de547b0faef2c4a1cc4ece1d44"
+      },
+      "8": {
+        "file": "safe_lstm_single_layers_32_tok-last_lr-0.0001_reg-1_seed-8.pt",
+        "sha256": "38863cdc7b82fd1a9334a4b252d88e0b9ea98f49ba6fe4f2f40ccd71d732aa90"
+      },
+      "9": {
+        "file": "safe_lstm_single_layers_32_tok-last_lr-0.0001_reg-1_seed-9.pt",
+        "sha256": "fe13cefd043dad651b673a2e4993deb779c51635f0a57b3aa7d9e77887b52810"
+      }
+    },
+    "mlp": {
+      "0": {
+        "file": "safe_mlp_single_layers_32_tok-last_lr-0.0001_reg-0.01_seed-0.pt",
+        "sha256": "f6280d5e5b03442936d5277dbedeed16fe9625cbc465d88c68fff3ff68e9219e"
+      },
+      "1": {
+        "file": "safe_mlp_single_layers_32_tok-last_lr-0.0001_reg-0.01_seed-1.pt",
+        "sha256": "2009847824574109689b739ed91138c823af5ab5bff9bdc90438b37963552d40"
+      },
+      "2": {
+        "file": "safe_mlp_single_layers_32_tok-last_lr-0.0001_reg-0.01_seed-2.pt",
+        "sha256": "3a3397932009ee0484ccbacfe4cf02e3a188c02bb978ed4b9acda1d46e5aec10"
+      },
+      "3": {
+        "file": "safe_mlp_single_layers_32_tok-last_lr-0.0001_reg-0.01_seed-3.pt",
+        "sha256": "da9df3716878aff68843ae07ccfe5b28552b70816369a1df75642d44f033cbf2"
+      },
+      "4": {
+        "file": "safe_mlp_single_layers_32_tok-last_lr-0.0001_reg-0.01_seed-4.pt",
+        "sha256": "da6c33bf015edcf28e2361c0b25678aaaf069276864e258e79c9f23d8a44b227"
+      },
+      "5": {
+        "file": "safe_mlp_single_layers_32_tok-last_lr-0.0001_reg-0.01_seed-5.pt",
+        "sha256": "2b3b540a519c298a8260f10c0bd50e256c781b79edf8e3fb9cf91cbbc913203c"
+      },
+      "6": {
+        "file": "safe_mlp_single_layers_32_tok-last_lr-0.0001_reg-0.01_seed-6.pt",
+        "sha256": "a6f3757dedf0e85006fe65b87a8b153afc7f29b66c787113aa38d49b5ee11efe"
+      },
+      "7": {
+        "file": "safe_mlp_single_layers_32_tok-last_lr-0.0001_reg-0.01_seed-7.pt",
+        "sha256": "eeb8e592167d85aac36d024e46d9f446feebd4bebb18ca93f4f51642c99ddc90"
+      },
+      "8": {
+        "file": "safe_mlp_single_layers_32_tok-last_lr-0.0001_reg-0.01_seed-8.pt",
+        "sha256": "4a74a0e8ea17a83a5ebd2e19d19f0f311cf38d4954feaedd8265f5e50c37b85c"
+      },
+      "9": {
+        "file": "safe_mlp_single_layers_32_tok-last_lr-0.0001_reg-0.01_seed-9.pt",
+        "sha256": "e4867e180b752d09df06a482978640aa9db1a496b669e72b46202ebe44df1ce8"
+      }
+    }
+  },
+  "generator_sha256": {
+    "data/dataloaders.py": "169f55fceb50259c571766dec6de20bdc4643cb5a4464fe4679587e62d3aa1ee",
+    "models/__init__.py": "44ac1fb5089626ea2eacd11f0b5496c15d1dd7d1d37c9531ac68df4bc3791d7c",
+    "models/base.py": "ed5ffc9a5ff2b3253617cb6aea67b53954cbe65350ec17d0312bf4f6f7097db7",
+    "models/layer_mix.py": "8a018a9c29851ad82289da804388c23281033a599e1b12cc4d1cac8791f59a90",
+    "models/linear_probe.py": "76f16497e850e76e67c1bedaaba02dceee70ac6c46a5864b083d905c4a98d722",
+    "models/lstm.py": "efe5567ae54ddc58fecf6a10a65bdf0f1a8461699a875508bf0beb95f00fe071",
+    "models/mlp.py": "a10a4f6442c875a0c737ec5a48666bcdc70d180faf1845bdda522079dc1026b3",
+    "models/safe_losses.py": "03c485738de92c80de95771e1baf1cb8ab8e0318b99c2d7c324b6875e6d587cd",
+    "scripts/evaluate_conformal.py": "ed8c15aadcffa632a4858d14dda1f4095abd7c52866b7df9b854416f260360ca",
+    "scripts/evaluate_functional_cp_loto.py": "d9ef26d707866187e6714e6885f99d6b5601dd3d09a8033678b3a58aebb03ff4",
+    "scripts/prepare_openvla_layer_subset.py": "111f9130a8c09b0763c4979737722209af0c3707d9260ac5c5e6c15ff137418d",
+    "scripts/score_bundle.py": "41452c9185299b366ba5772b5364c4dd78c162de7a325ccea07e5680e0e45506",
+    "scripts/score_layer_pooled_macro.py": "925c405806f4f544fce4d5fdce81613e627921da68fbe1933f7fa1b56c421946",
+    "scripts/verify_primary_prepared_data.py": "5916b9edc9bf7bdbae319948c0e2a71958a4641e344111b13a2e50ca7e518426"
+  },
+  "command": "scripts/evaluate_functional_cp_loto.py --root data/processed/primary_l32/openVLA-last-layer data/processed/primary_l32/openVLA-last-layer-2 --mlp-checkpoint-dir runs/openvla_mlp_loto_l32 --lstm-checkpoint-dir runs/openvla_lstm_loto_l32 --score-bundle-out docs/results_audit/score_bundle --output-dir runs/results_audit/functional_cp_loto_closeout --alphas 0.01,0.025,0.05,0.075,0.1,0.15,0.2,0.3 --cp-seeds 0,1,2,3,4,5,6,7,8,9 --horizon 520 --fixed-horizons 50,100,148 --task-bootstrap 10000 --bootstrap-seed 20260716",
+  "files": {
+    "records.csv": "1aed2d71cf5bcde82b3fa445870098d44d3532cdcf861177ff18c7073c383ec8",
+    "trajectories.npz": "3e6097b3d7a3263aeb4140848fa8041ff2f7148599972c60f08bb51d38516c81"
+  }
+}

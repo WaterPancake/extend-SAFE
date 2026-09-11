@@ -722,11 +722,26 @@ def verify_public_score_bundle(
     if set(splits) == {"mlp", "lstm"} and splits["mlp"] != splits["lstm"]:
         failures.append(f"{bundle}: MLP and LSTM split mappings differ")
     if checkpoint_audit is not None and checkpoint_audit.exists() and "mlp" in splits:
+        # The score bundle stores only val + test records; reconstruct the
+        # full split (train = complement of val + test within 0..999) so the
+        # digest matches the checkpoint audit which was computed from
+        # train + val + test.
+        full_splits = {}
+        for fold, split in sorted(splits["mlp"].items()):
+            val = sorted(split.get("val", []))
+            test = sorted(split.get("test", []))
+            held_out = set(val) | set(test)
+            train = sorted(i for i in range(1000) if i not in held_out)
+            full_splits[str(fold)] = {
+                "train": train,
+                "val": val,
+                "test": test,
+            }
         normalized_splits = {
             str(fold): {
                 role: sorted(indices) for role, indices in sorted(split.items())
             }
-            for fold, split in sorted(splits["mlp"].items())
+            for fold, split in sorted(full_splits.items())
         }
         split_sha256 = hashlib.sha256(
             json.dumps(

@@ -1,4 +1,5 @@
 __pycache__/
+.pytest_cache/
 .DS_Store
 .env
 .venv
@@ -10,11 +11,12 @@ venv/
 
 # Generated experiment outputs
 runs/
+reproduced/
 wandb/
 
 # Generated rollout/data artifacts
 # Keep this scoped to known output directories instead of ignoring all JSON/CSV globally.
 data/rollouts/**
+data/processed/**
 data/openVLA_rollout_video/**
 data/visualization/**
-docs/results_audit/**

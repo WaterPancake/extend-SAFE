@@ -149,6 +149,201 @@ class SparseLayerMixLSTMModel(LayerMixLSTMModel):
         super().__init__(*args, **kwargs)
 
 
+class DynamicLayerMixLSTMModel(BaseModel):
+    """Causally gate VLA layers at every timestep before temporal modeling.
+
+    The projection, gate, LSTM, and head are shared across layers. Therefore
+    the trainable parameter count is independent of ``n_layers``: comparisons
+    between one and multiple layers control for model capacity.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        n_layers: int,
+        hidden_dim_per_layer: int,
+        projection_dim: int = 32,
+        lstm_hidden_dim: int = 64,
+        lstm_layers: int = 1,
+        dropout: float = 0.0,
+        loss_type: str = "bce",
+        threshold: float = 1.0,
+        use_time_weighting: bool = False,
+    ) -> None:
+        super().__init__(input_dim)
+        if n_layers < 1:
+            raise ValueError("n_layers must be >= 1")
+        if input_dim != n_layers * hidden_dim_per_layer:
+            raise ValueError(
+                "input_dim must equal n_layers * hidden_dim_per_layer, got "
+                f"{input_dim} != {n_layers} * {hidden_dim_per_layer}"
+            )
+        if loss_type not in {"safe", "bce"}:
+            raise ValueError(f"Unsupported loss_type={loss_type!r}")
+
+        self.n_layers = n_layers
+        self.hidden_dim_per_layer = hidden_dim_per_layer
+        self.projection_dim = projection_dim
+        self.lstm_hidden_dim = lstm_hidden_dim
+        self.loss_type = loss_type
+        self.threshold = threshold
+        self.use_time_weighting = use_time_weighting
+
+        self.layer_norm = nn.LayerNorm(hidden_dim_per_layer)
+        self.layer_projection = nn.Sequential(
+            nn.Linear(hidden_dim_per_layer, projection_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.layer_gate = nn.Linear(projection_dim, 1, bias=False)
+
+        lstm_dropout = dropout if lstm_layers > 1 else 0.0
+        self.lstm = nn.LSTM(
+            projection_dim,
+            lstm_hidden_dim,
+            lstm_layers,
+            batch_first=True,
+            dropout=lstm_dropout,
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.head = nn.Linear(lstm_hidden_dim, 1)
+
+    def _project_and_gate(
+        self, features: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, seq_len, _ = features.shape
+        layered = features.reshape(
+            batch_size, seq_len, self.n_layers, self.hidden_dim_per_layer
+        )
+        projected = self.layer_projection(self.layer_norm(layered))
+        weights = torch.softmax(self.layer_gate(projected), dim=2)
+        return (projected * weights).sum(dim=2), weights
+
+    def gate_weights(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Return per-timestep layer weights for diagnostics."""
+
+        _, weights = self._project_and_gate(batch["features"])
+        return weights.squeeze(-1)
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        features = batch["features"]
+        if features.ndim != 3:
+            raise ValueError(f"features must be 3-D, got {tuple(features.shape)}")
+        if features.shape[-1] != self.input_dim:
+            raise ValueError(
+                f"input_dim mismatch: got {features.shape[-1]}, expected {self.input_dim}"
+            )
+
+        mixed, _ = self._project_and_gate(features)
+        hidden, _ = self.lstm(mixed)
+        return torch.sigmoid(self.head(self.dropout(hidden)))
+
+    def forward_loss(
+        self,
+        batch: dict[str, torch.Tensor],
+        weights: list[float] | tuple[float, float] | None = None,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        scores = self(batch)
+        class_weights = tuple(weights) if weights is not None else None
+        if self.loss_type == "safe":
+            return safe_cumulative_loss(
+                scores,
+                batch,
+                threshold=self.threshold,
+                use_time_weighting=self.use_time_weighting,
+                class_weights=class_weights,
+            )
+        return timestep_bce_loss(
+            scores,
+            batch,
+            use_time_weighting=self.use_time_weighting,
+            class_weights=class_weights,
+        )
+
+    forward_compute_loss = forward_loss
+
+
+class ResidualAuxLayerLSTMModel(BaseModel):
+    """Add a zero-initialized auxiliary-layer correction to a frozen monitor.
+
+    Inputs concatenate the auxiliary layer first and the final layer second.
+    The final-layer monitor is frozen, so the auxiliary branch cannot erase its
+    representation; at initialization this model is exactly the baseline.
+    """
+
+    def __init__(
+        self,
+        hidden_dim_per_layer: int,
+        base_projection_dim: int = 32,
+        base_lstm_hidden_dim: int = 64,
+        aux_projection_dim: int = 16,
+        aux_lstm_hidden_dim: int = 32,
+        dropout: float = 0.0,
+        use_time_weighting: bool = False,
+    ) -> None:
+        super().__init__(2 * hidden_dim_per_layer)
+        self.hidden_dim_per_layer = hidden_dim_per_layer
+        self.use_time_weighting = use_time_weighting
+        self.base = DynamicLayerMixLSTMModel(
+            input_dim=hidden_dim_per_layer,
+            n_layers=1,
+            hidden_dim_per_layer=hidden_dim_per_layer,
+            projection_dim=base_projection_dim,
+            lstm_hidden_dim=base_lstm_hidden_dim,
+            dropout=dropout,
+            loss_type="bce",
+        )
+        self.aux_norm = nn.LayerNorm(hidden_dim_per_layer)
+        self.aux_projection = nn.Sequential(
+            nn.Linear(hidden_dim_per_layer, aux_projection_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.aux_lstm = nn.LSTM(
+            aux_projection_dim, aux_lstm_hidden_dim, batch_first=True
+        )
+        self.aux_head = nn.Linear(aux_lstm_hidden_dim, 1)
+        nn.init.zeros_(self.aux_head.weight)
+        nn.init.zeros_(self.aux_head.bias)
+
+    def freeze_base(self) -> None:
+        for parameter in self.base.parameters():
+            parameter.requires_grad_(False)
+        self.base.eval()
+
+    def residual_logits(self, features: torch.Tensor) -> torch.Tensor:
+        auxiliary = features[:, :, : self.hidden_dim_per_layer]
+        projected = self.aux_projection(self.aux_norm(auxiliary))
+        hidden, _ = self.aux_lstm(projected)
+        return self.aux_head(hidden)
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        features = batch["features"]
+        if features.ndim != 3 or features.shape[-1] != self.input_dim:
+            raise ValueError(
+                f"expected features (*, *, {self.input_dim}), got {tuple(features.shape)}"
+            )
+        final_layer = features[:, :, self.hidden_dim_per_layer :]
+        with torch.no_grad():
+            base_scores = self.base({"features": final_layer})
+        base_logits = torch.logit(base_scores.clamp(1e-5, 1.0 - 1e-5))
+        return torch.sigmoid(base_logits + self.residual_logits(features))
+
+    def forward_loss(
+        self,
+        batch: dict[str, torch.Tensor],
+        weights: list[float] | tuple[float, float] | None = None,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        return timestep_bce_loss(
+            self(batch),
+            batch,
+            use_time_weighting=self.use_time_weighting,
+            class_weights=tuple(weights) if weights is not None else None,
+        )
+
+    forward_compute_loss = forward_loss
+
+
 class LayerTokenTransformerLSTMModel(BaseModel):
     """Encode LM layers as tokens per timestep, then model time with an LSTM."""
 

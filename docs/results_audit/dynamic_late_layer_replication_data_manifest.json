@@ -1,0 +1,130 @@
+{
+  "input_root": "data/processed/OpenVLA_500_2",
+  "output_root": "data/processed/openVLA_500_2_l24_l28_l32_last_s4",
+  "source_rollouts": 500,
+  "written": 500,
+  "skipped_existing": 0,
+  "corrupt_source_artifacts": [],
+  "layers": [
+    24,
+    28,
+    32
+  ],
+  "token_index": -1,
+  "temporal_stride": 4,
+  "source_inventory_sha256": "7268e6bb2aae10bb17dc6d7415db8d0c632f8ef142aa1fdea5c6aaae486adab8",
+  "output_audit": {
+    "rollouts": 500,
+    "task_counts": {
+      "0": 50,
+      "1": 50,
+      "2": 50,
+      "3": 50,
+      "4": 50,
+      "5": 50,
+      "6": 50,
+      "7": 50,
+      "8": 50,
+      "9": 50
+    },
+    "episode_coverage": {
+      "0": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "1": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "2": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "3": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "4": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "5": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "6": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "7": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "8": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "9": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      }
+    },
+    "outcome_counts": {
+      "task0_success0": 20,
+      "task0_success1": 30,
+      "task1_success0": 15,
+      "task1_success1": 35,
+      "task2_success0": 29,
+      "task2_success1": 21,
+      "task3_success0": 25,
+      "task3_success1": 25,
+      "task4_success0": 34,
+      "task4_success1": 16,
+      "task5_success0": 9,
+      "task5_success1": 41,
+      "task6_success0": 24,
+      "task6_success1": 26,
+      "task7_success0": 17,
+      "task7_success1": 33,
+      "task8_success0": 40,
+      "task8_success1": 10,
+      "task9_success0": 33,
+      "task9_success1": 17
+    },
+    "minimum_length": 37,
+    "maximum_length": 130,
+    "homogeneous_schema": true,
+    "source_action_token_index_counts": {
+      "-1": 500
+    },
+    "schemas": [
+      {
+        "count": 500,
+        "layers": [
+          24,
+          28,
+          32
+        ],
+        "hidden_dim_per_layer": 4096,
+        "hidden_ndim": 3,
+        "hidden_shape_suffix": [
+          1,
+          12288
+        ],
+        "temporal_stride": 4,
+        "hidden_state_layout": "action_token_axis_then_concatenated_selected_layers"
+      }
+    ],
+    "inventory_sha256": "eed95ae5322feb5588d8a0f3af69cf66b4c3fa5a663f5b5412ea9a46deae9549"
+  }
+}

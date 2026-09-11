@@ -62,7 +62,8 @@ class MixedSchemaLayerDataset(Dataset):
         self.layer = int(layer)
         self.token_pool = token_pool
         self.selected_layers = (self.layer,)
-        self.hidden_dim = 4096
+        first_artifact = self._load(self.paths[0])
+        self.hidden_dim = int(first_artifact["hidden_state_dim_per_layer"])
         self.task_min_steps: dict[int, int] = {}
         for path in self.paths:
             artifact = self._load(path)

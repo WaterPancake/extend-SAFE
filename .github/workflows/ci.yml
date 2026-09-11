@@ -1,0 +1,46 @@
+name: publication-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.11"
+      - name: Install frozen environment
+        run: uv sync --frozen --extra dev
+      - name: Compile Python sources
+        run: uv run --frozen --extra dev python -m compileall -q data models scripts tests
+      - name: Run tests
+        env:
+          MPLCONFIGDIR: /tmp/matplotlib
+        run: uv run --frozen --extra dev pytest -q
+      - name: Validate citation metadata
+        run: uv run --frozen --extra dev cffconvert --validate
+      - name: Verify publication artifacts
+        env:
+          MPLCONFIGDIR: /tmp/matplotlib
+        run: uv run --frozen --extra dev python scripts/verify_publication.py
+      - name: Replay primary functional-CP analysis
+        env:
+          MPLCONFIGDIR: /tmp/matplotlib
+        run: |
+          uv run --frozen --extra dev python scripts/evaluate_functional_cp_loto.py \
+            --score-bundle-in docs/results_audit/score_bundle \
+            --output-dir reproduced/functional_cp_loto \
+            --alphas 0.01,0.025,0.05,0.075,0.1,0.15,0.2,0.3 \
+            --cp-seeds 0,1,2,3,4,5,6,7,8,9 \
+            --horizon 520 --fixed-horizons 50,100,148 \
+            --task-bootstrap 10000 --bootstrap-seed 20260716 \
+            --device cpu
+      - name: Compare replay with published tables
+        run: |
+          uv run --frozen --extra dev python scripts/compare_functional_cp_outputs.py \
+            --expected-root docs/results_audit \
+            --actual-root reproduced/functional_cp_loto

@@ -1,0 +1,150 @@
+{
+  "input_root": "data/rollouts/openVLA_500_task3_full",
+  "output_root": "data/processed/openVLA_500_l20_l32_last_s4",
+  "source_rollouts": 50,
+  "written": 50,
+  "skipped_existing": 0,
+  "corrupt_source_artifacts": [],
+  "layers": [
+    20,
+    32
+  ],
+  "token_index": -1,
+  "temporal_stride": 4,
+  "source_inventory_sha256": "41abcf7d05d17d668119fd4e916dd00b8d098119ea4a52a96cac877103602b10",
+  "output_audit": {
+    "rollouts": 500,
+    "task_counts": {
+      "0": 50,
+      "1": 50,
+      "2": 50,
+      "3": 50,
+      "4": 50,
+      "5": 50,
+      "6": 50,
+      "7": 50,
+      "8": 50,
+      "9": 50
+    },
+    "episode_coverage": {
+      "0": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "1": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "2": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "3": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "4": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "5": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "6": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "7": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "8": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      },
+      "9": {
+        "minimum": 0,
+        "maximum": 49,
+        "unique_count": 50
+      }
+    },
+    "outcome_counts": {
+      "task0_success0": 19,
+      "task0_success1": 31,
+      "task1_success0": 12,
+      "task1_success1": 38,
+      "task2_success0": 24,
+      "task2_success1": 26,
+      "task3_success0": 27,
+      "task3_success1": 23,
+      "task4_success0": 28,
+      "task4_success1": 22,
+      "task5_success0": 8,
+      "task5_success1": 42,
+      "task6_success0": 22,
+      "task6_success1": 28,
+      "task7_success0": 20,
+      "task7_success1": 30,
+      "task8_success0": 36,
+      "task8_success1": 14,
+      "task9_success0": 31,
+      "task9_success1": 19
+    },
+    "minimum_length": 37,
+    "maximum_length": 130,
+    "homogeneous_schema": true,
+    "schemas": [
+      {
+        "count": 500,
+        "layers": [
+          20,
+          32
+        ],
+        "hidden_dim_per_layer": 4096,
+        "hidden_ndim": 3,
+        "hidden_shape_suffix": [
+          1,
+          8192
+        ],
+        "source_action_token_index": 6,
+        "temporal_stride": 4,
+        "hidden_state_layout": "action_token_axis_then_concatenated_selected_layers"
+      }
+    ],
+    "inventory_sha256": "332fcc43534d56c1afdc7aa0c1ecffe95883e0e82f2475d9af1edf8042ed86d3"
+  },
+  "prior_preparation_manifest": {
+    "file": "manifest_pre_task3.json",
+    "sha256": "b8d546e413636817d62155d0a816f21b08dd909e5bfe690e9d8fc462eb1b36fc",
+    "manifest": {
+      "input_root": "data/rollouts/openVLA_500",
+      "output_root": "data/processed/openVLA_500_l20_l32_last_s4",
+      "source_rollouts": 451,
+      "written": 300,
+      "skipped_existing": 150,
+      "corrupt_source_artifacts": [
+        {
+          "path": "data/rollouts/openVLA_500/task3--ep0--succ1.pkl",
+          "error": "UnpicklingError('pickle data was truncated')"
+        }
+      ],
+      "layers": [
+        20,
+        32
+      ],
+      "token_index": -1,
+      "temporal_stride": 4,
+      "source_inventory_sha256": "ea58fe49495f1b3db21dfae825b128ce93fd2e4dda7ed5be892ae56a9801b3b4"
+    }
+  }
+}

@@ -20,7 +20,10 @@ import argparse
 import gc
 import json
 import re
+import shlex
 import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +33,8 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
 from data.dataloaders import collate_rollouts
 from scripts.evaluate_conformal import (
@@ -39,10 +43,12 @@ from scripts.evaluate_conformal import (
     functional_cp_thresholds,
 )
 from scripts.score_layer_pooled_macro import MixedSchemaLayerDataset, build_probe
+from scripts.score_bundle import load_score_bundle, sha256_file, write_score_bundle
 
 
 SEED_RE = re.compile(r"_seed-(\d+)\.pt$")
 SUMMARY_METRICS = [
+    "roc_auc_max_score",
     "realized_fpr",
     "catch_rate",
     "balanced_accuracy",
@@ -64,6 +70,15 @@ def parse_int_list(value: str) -> list[int]:
     values = [int(item.strip()) for item in value.split(",") if item.strip()]
     if not values:
         raise ValueError("CP seeds must not be empty")
+    return values
+
+
+def parse_optional_int_list(value: str) -> list[int]:
+    if not value.strip():
+        return []
+    values = sorted(set(parse_int_list(value)))
+    if any(item <= 0 for item in values):
+        raise ValueError("fixed horizons must be positive integers")
     return values
 
 
@@ -163,12 +178,16 @@ def score_family(
 
 def evaluate_family(
     model_type: str,
-    records: dict[int, list[RolloutScores]],
+    records: dict[
+        int, Sequence[RolloutScores] | Mapping[int, RolloutScores]
+    ],
     splits: dict[int, dict[str, list[int]]],
     alphas: list[float],
     cp_seeds: list[int],
     horizon: int,
+    fixed_horizons: list[int] | None = None,
 ) -> pd.DataFrame:
+    fixed_horizons = fixed_horizons or []
     rows = []
     for fold in range(10):
         validation = [records[fold][index] for index in splits[fold]["val"]]
@@ -179,7 +198,26 @@ def evaluate_family(
                 f"{model_type} fold {fold} is not LOTO: tasks={heldout_tasks}"
             )
         heldout_task = heldout_tasks[0]
+        if heldout_task != fold:
+            raise ValueError(
+                f"{model_type} fold {fold}: expected held-out task {fold}, "
+                f"found task {heldout_task}"
+            )
+        validation_tasks = {int(record.task_id) for record in validation}
+        if heldout_task in validation_tasks:
+            raise ValueError(
+                f"{model_type} fold {fold}: held-out task {heldout_task} leaks "
+                "into the validation/calibration split"
+            )
         n_validation_success = sum(record.success for record in validation)
+        minimum_length = min(record.length for record in validation + test)
+        invalid_horizons = [value for value in fixed_horizons if value > minimum_length]
+        if invalid_horizons:
+            raise ValueError(
+                f"{model_type} fold {fold}: fixed horizons {invalid_horizons} exceed "
+                f"the minimum validation/test rollout length {minimum_length}; fixed "
+                "evaluation must not extend or censor trajectories"
+            )
         for cp_seed in cp_seeds:
             for alpha in alphas:
                 thresholds, threshold_info = functional_cp_thresholds(
@@ -211,6 +249,70 @@ def evaluate_family(
                                 "modulation_calibration_count"
                             ],
                             "band_width": threshold_info["band_width"],
+                            "realized_fpr": metrics["fpr"],
+                            "catch_rate": metrics["tpr"],
+                            "tnr": metrics["tnr"],
+                            "balanced_accuracy": metrics["balanced_accuracy"],
+                            "caught_alarm_fraction": caught_alarm_fraction,
+                            "effective_alarm_fraction": effective_alarm_fraction,
+                            "caught_lead_fraction": (
+                                1.0 - caught_alarm_fraction
+                                if np.isfinite(caught_alarm_fraction)
+                                else float("nan")
+                            ),
+                            "effective_lead_fraction": 1.0
+                            - effective_alarm_fraction,
+                            "success_false_alarm_fraction": metrics[
+                                "mean_success_false_alarm_fraction"
+                            ],
+                            "any_alarm_rate": metrics["any_alarm_rate"],
+                            "roc_auc_max_score": metrics["roc_auc_max_score"],
+                        }
+                    )
+                for fixed_horizon in fixed_horizons:
+                    fixed_thresholds, fixed_info = functional_cp_thresholds(
+                        validation,
+                        test,
+                        alpha,
+                        cp_seed,
+                        horizon=fixed_horizon,
+                    )
+                    fixed_test = [
+                        replace(
+                            record,
+                            length=fixed_horizon,
+                            task_min_step=fixed_horizon,
+                            scores=record.scores[:fixed_horizon],
+                        )
+                        for record in test
+                    ]
+                    fixed_by_time, _ = evaluate_thresholds(
+                        fixed_test,
+                        fixed_thresholds,
+                        csv_root=None,
+                        align_extend=False,
+                    )
+                    metrics = fixed_by_time["by final end"]
+                    caught_alarm_fraction = metrics[
+                        "mean_failed_first_alarm_fraction"
+                    ]
+                    effective_alarm_fraction = metrics["avg_det_time"]
+                    rows.append(
+                        {
+                            "model": model_type,
+                            "fold": fold,
+                            "heldout_task": heldout_task,
+                            "cp_seed": cp_seed,
+                            "alpha": alpha,
+                            "eval_time": f"fixed horizon {fixed_horizon}",
+                            "n_validation_success": n_validation_success,
+                            "regression_calibration_count": fixed_info[
+                                "regression_calibration_count"
+                            ],
+                            "modulation_calibration_count": fixed_info[
+                                "modulation_calibration_count"
+                            ],
+                            "band_width": fixed_info["band_width"],
                             "realized_fpr": metrics["fpr"],
                             "catch_rate": metrics["tpr"],
                             "tnr": metrics["tnr"],
@@ -433,6 +535,7 @@ def write_report(
         f"- Alphas: `{','.join(str(value) for value in args.alpha_values)}`",
         f"- CP seeds: `{','.join(str(value) for value in args.cp_seed_values)}`",
         f"- Horizon: `{args.horizon}`",
+        f"- Fixed horizons: `{','.join(str(value) for value in args.fixed_horizon_values) or 'none'}`",
         "- Calibration: successful seen-task validation rollouts only",
         "- Uncertainty: CP-seed mean within task, then task-macro; 95% task-bootstrap CI",
         "",
@@ -472,15 +575,34 @@ def write_report(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, nargs="+", required=True)
-    parser.add_argument("--mlp-checkpoint-dir", type=Path, required=True)
-    parser.add_argument("--lstm-checkpoint-dir", type=Path, required=True)
+    parser.add_argument("--root", type=Path, nargs="+")
+    parser.add_argument("--mlp-checkpoint-dir", type=Path)
+    parser.add_argument("--lstm-checkpoint-dir", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--alphas", default="0.01,0.025,0.05,0.075,0.1,0.15,0.2,0.3"
     )
     parser.add_argument("--cp-seeds", default="0,1,2,3,4,5,6,7,8,9")
     parser.add_argument("--horizon", type=int, default=520)
+    parser.add_argument(
+        "--fixed-horizons",
+        default="",
+        help=(
+            "Comma-separated common observation horizons. Every validation and "
+            "test rollout must be at least this long; no extension or censoring "
+            "is allowed. The closeout analysis preregisters 50,100,148."
+        ),
+    )
+    parser.add_argument(
+        "--score-bundle-in",
+        type=Path,
+        help="Replay evaluation from a published score bundle without raw latents.",
+    )
+    parser.add_argument(
+        "--score-bundle-out",
+        type=Path,
+        help="Write validation/test trajectories after checkpoint inference.",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--task-bootstrap", type=int, default=10_000)
     parser.add_argument("--bootstrap-seed", type=int, default=20260716)
@@ -494,28 +616,112 @@ def main() -> None:
     args = parse_args()
     args.alpha_values = parse_float_list(args.alphas)
     args.cp_seed_values = parse_int_list(args.cp_seeds)
+    args.fixed_horizon_values = parse_optional_int_list(args.fixed_horizons)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    device = torch.device(args.device)
-    dataset = MixedSchemaLayerDataset(args.root, layer=32, token_pool="last")
-    if len(dataset) != 1000:
-        raise ValueError(f"Expected 1,000 rollouts, found {len(dataset)}")
-    print(
-        f"dataset: {len(dataset)} rollouts, horizon={args.horizon}, device={device}",
-        flush=True,
-    )
+
+    if args.score_bundle_in is not None:
+        if any(
+            value is not None
+            for value in (
+                args.root,
+                args.mlp_checkpoint_dir,
+                args.lstm_checkpoint_dir,
+                args.score_bundle_out,
+            )
+        ):
+            raise ValueError(
+                "--score-bundle-in is mutually exclusive with raw roots, "
+                "checkpoint directories, and --score-bundle-out"
+            )
+        family_records, family_splits, bundle_manifest = load_score_bundle(
+            args.score_bundle_in
+        )
+        expected_models = {"mlp", "lstm"}
+        if set(family_records) != expected_models:
+            raise ValueError(
+                f"Score bundle must contain {sorted(expected_models)}, found "
+                f"{sorted(family_records)}"
+            )
+        checkpoint_manifest = bundle_manifest.get("checkpoint_manifest", {})
+        root_manifest: Any = bundle_manifest.get("source_root_aliases", {})
+        n_rollouts = int(bundle_manifest["unique_rollout_count"])
+        if n_rollouts != 1000:
+            raise ValueError(f"Expected 1,000 unique rollouts, found {n_rollouts}")
+        print(
+            f"score bundle: {n_rollouts} rollouts, horizon={args.horizon}", flush=True
+        )
+    else:
+        missing = [
+            name
+            for name, value in (
+                ("--root", args.root),
+                ("--mlp-checkpoint-dir", args.mlp_checkpoint_dir),
+                ("--lstm-checkpoint-dir", args.lstm_checkpoint_dir),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError(
+                "Raw inference requires " + ", ".join(missing)
+            )
+        device = torch.device(args.device)
+        dataset = MixedSchemaLayerDataset(args.root, layer=32, token_pool="last")
+        if len(dataset) != 1000:
+            raise ValueError(f"Expected 1,000 rollouts, found {len(dataset)}")
+        print(
+            f"dataset: {len(dataset)} rollouts, horizon={args.horizon}, device={device}",
+            flush=True,
+        )
+        family_records = {}
+        family_splits = {}
+        family_paths = {}
+        for model_type, checkpoint_dir in (
+            ("mlp", args.mlp_checkpoint_dir),
+            ("lstm", args.lstm_checkpoint_dir),
+        ):
+            records, splits, paths = score_family(
+                model_type, checkpoint_dir, dataset, args.batch_size, device
+            )
+            family_records[model_type] = records
+            family_splits[model_type] = splits
+            family_paths[model_type] = paths
+        checkpoint_manifest = {
+            model: {
+                str(fold): {"file": path.name, "sha256": sha256_file(path)}
+                for fold, path in paths.items()
+            }
+            for model, paths in family_paths.items()
+        }
+        root_manifest = {
+            f"root-{index}": path.name for index, path in enumerate(args.root)
+        }
+        n_rollouts = len(dataset)
+        if args.score_bundle_out is not None:
+            command = " ".join(shlex.quote(value) for value in sys.argv)
+            write_score_bundle(
+                args.score_bundle_out,
+                family_records,
+                family_splits,
+                args.root,
+                family_paths,
+                generator_paths=[
+                    Path(__file__),
+                    Path(__file__).with_name("evaluate_conformal.py"),
+                    Path(__file__).with_name("prepare_openvla_layer_subset.py"),
+                    Path(__file__).with_name("score_bundle.py"),
+                    Path(__file__).with_name("score_layer_pooled_macro.py"),
+                    Path(__file__).with_name("verify_primary_prepared_data.py"),
+                    REPO_ROOT / "data" / "dataloaders.py",
+                    *sorted((REPO_ROOT / "models").glob("*.py")),
+                ],
+                command=command,
+            )
+            print(f"wrote score bundle to {args.score_bundle_out}", flush=True)
 
     raw_frames = []
-    checkpoint_manifest = {}
-    for model_type, checkpoint_dir in (
-        ("mlp", args.mlp_checkpoint_dir),
-        ("lstm", args.lstm_checkpoint_dir),
-    ):
-        records, splits, paths = score_family(
-            model_type, checkpoint_dir, dataset, args.batch_size, device
-        )
-        checkpoint_manifest[model_type] = {
-            str(fold): str(path) for fold, path in paths.items()
-        }
+    for model_type in ("mlp", "lstm"):
+        records = family_records[model_type]
+        splits = family_splits[model_type]
         raw = evaluate_family(
             model_type,
             records,
@@ -523,6 +729,7 @@ def main() -> None:
             args.alpha_values,
             args.cp_seed_values,
             args.horizon,
+            args.fixed_horizon_values,
         )
         raw.to_csv(args.output_dir / f"functional_cp_{model_type}_raw.csv", index=False)
         raw_frames.append(raw)
@@ -534,7 +741,6 @@ def main() -> None:
         )
         print(f"\n{model_type.upper()} full-rollout macro over task x CP seed:")
         print(quick.to_string(index=False), flush=True)
-        del records
         gc.collect()
 
     raw = pd.concat(raw_frames, ignore_index=True)
@@ -549,12 +755,36 @@ def main() -> None:
         args.output_dir / "functional_cp_loto_cp_seed_sensitivity.csv", index=False
     )
     points.to_csv(args.output_dir / "functional_cp_loto_operating_points.csv", index=False)
+    fixed_mask = raw["eval_time"].str.startswith("fixed horizon ")
+    if fixed_mask.any():
+        fixed_raw = raw[fixed_mask].copy()
+        fixed_per_task = per_task[
+            per_task["eval_time"].str.startswith("fixed horizon ")
+        ].copy()
+        fixed_macro = macro[macro["eval_time"].str.startswith("fixed horizon ")].copy()
+        fixed_points = points[
+            points["eval_time"].str.startswith("fixed horizon ")
+        ].copy()
+        fixed_raw.to_csv(
+            args.output_dir / "functional_cp_fixed_horizon_raw.csv", index=False
+        )
+        fixed_per_task.to_csv(
+            args.output_dir / "functional_cp_fixed_horizon_per_task.csv", index=False
+        )
+        fixed_macro.to_csv(
+            args.output_dir / "functional_cp_fixed_horizon_macro.csv", index=False
+        )
+        fixed_points.to_csv(
+            args.output_dir / "functional_cp_fixed_horizon_operating_points.csv",
+            index=False,
+        )
     plot_tradeoff(macro, args.output_dir / "functional_cp_loto_tradeoff.png")
     write_report(macro, points, args)
     manifest = {
-        "roots": [str(path) for path in args.root],
-        "n_rollouts": len(dataset),
+        "roots": root_manifest,
+        "n_rollouts": n_rollouts,
         "horizon": args.horizon,
+        "fixed_horizons": args.fixed_horizon_values,
         "alphas": args.alpha_values,
         "cp_seeds": args.cp_seed_values,
         "task_bootstrap": args.task_bootstrap,

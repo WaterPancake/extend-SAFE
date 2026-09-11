@@ -1,7 +1,7 @@
 ---
 title: "When Pooled AUC Is Not Early Warning"
 subtitle: "A technical audit of SAFE-style failure detection on OpenVLA and LIBERO"
-date: 2026-07-17
+date: 2026-08-03
 format:
   gfm:
     toc: true
@@ -53,11 +53,11 @@ saved checkpoints.
 | LOTO `falert_early` AUC on all 10 tasks | **Primary.** Every task is held out once; task bootstrap exposes heterogeneity. | Headline result |
 | Exact pooled-AUC pair decomposition on finalized checkpoints | **Primary mechanism, limited population inference.** Exact for the observed splits; only three held-out tasks per original split. | Headline explanation with caveat |
 | Rollout-length distribution and length-only AUC | **Primary diagnostic.** Directly establishes the timeout shortcut in uncapped evaluation. | Headline diagnostic |
-| Incremental layer-value tests under LOTO | **Strong secondary negative result.** Tests whether extra layers improve held-out AUC; uncertainty is reported. | Supporting result |
+| Incremental layer-value tests under LOTO | **Mixed secondary result.** Most tests are null; the late-layer trio beats shuffled features but not layer 32 or functional CP. | Supporting result |
 | CKA and UMAP latent geometry | **Explanatory only.** Useful for diagnosing task structure, but embeddings are not evidence of detector performance. | Appendix/support |
 | Fixed-timestep and progress-proxy analyses | **Supporting.** Useful disentanglement checks, but less direct than the final LOTO functional-CP evaluation. | Not headlined |
 | Earlier constant-threshold detection-time tables | **Superseded.** They used a simpler split-conformal threshold rather than SAFE's functional procedure. | Excluded from conclusions |
-| Pilot 500-rollout and undertrained runs | **Development evidence.** Valuable for generating hypotheses, not for final effect sizes. | Excluded from conclusions |
+| Earlier pilot and undertrained runs | **Development evidence.** Valuable for generating hypotheses, not for final effect sizes. | Excluded from conclusions |
 
 Earlier prose drafts and their constant-threshold conformal tables were
 consolidated into this report. Their older conformal numbers are superseded by
@@ -230,7 +230,147 @@ methods. Its 95% intervals cross zero: [-0.011, 0.056] for PCA-100 and
 appropriate conclusion is **no measurable complementary held-out signal in
 these tests**, not proof that complementary information cannot exist.
 
-### 4.2 Latent geometry is organized strongly by task
+### 4.2 Time-resolved fusion does not improve ranking; a residual warning signal is horizon-dependent
+
+The pooled PCA/PLS analysis could miss nonlinear or short-lived information.
+We therefore first tested the strongest individual candidate, layer 20, with a
+causal time-resolved model. A shared projection dynamically gates layers 20 and 32 at
+each timestep before an LSTM. Sharing all parameters makes the one-layer and
+two-layer versions exactly capacity matched at 164,481 trainable parameters.
+Training and evaluation stop at `task_min_step`, and a negative control replaces
+layer 20 with another rollout from the same task and data partition. Because
+all rollouts from a task share the early-window length, this retains task and
+progress structure while breaking episode alignment.
+
+The completed follow-up now uses two ordered 500-rollout shards: 1,000 rollouts
+total and 100 for each of tasks 0--9. All files have the same compact schema:
+layers 20 and 32, the last action token, 4,096 features per layer, and temporal
+stride 4. The first shard was normalized from token-preserving artifacts and
+the second from artifacts that had already selected the last token; the two
+portable schema and inventory audits are published with the results. This
+remains a targeted secondary experiment with newly trained dynamic monitors,
+not a replacement for the report's primary finalized MLP/LSTM analysis.
+
+Three fixed training seeds are averaged within task before tasks are
+bootstrapped. This separates optimizer instability from held-out-task
+uncertainty.
+
+| Monitor | Macro held-out AUC | SD across tasks | Delta vs layer 32 | 95% task-bootstrap CI | Positive tasks |
+|---|---:|---:|---:|---:|---:|
+| Layer 32 | 0.673 | 0.083 | -- | -- | -- |
+| Dynamic layer 20 + 32 | 0.670 | 0.088 | -0.004 | [-0.020, 0.012] | 5/10 |
+| Dynamic shuffled 20 + 32 | 0.670 | 0.084 | -0.003 | [-0.018, 0.015] | 4/10 |
+| Frozen-32 + layer-20 residual | 0.681 | 0.097 | +0.007 | [-0.005, 0.018] | 7/10 |
+| Frozen-32 + shuffled residual | 0.679 | 0.087 | +0.005 | [-0.00002, 0.011] | 6/10 |
+
+The direct fusion delta varies substantially across the three optimization
+runs (+0.010, -0.025, and +0.003). After averaging seeds within task, its
+effect is slightly negative, only 5/10 task-level contrasts are positive, and
+the paired exact sign-flip test is not significant ($p=0.670$). Real fusion is
+also indistinguishable from shuffled fusion: -0.001 AUC (95% CI
+[-0.015, 0.014], $p=0.928$). The learned real-data gate nevertheless assigns
+69.8% of its mass to layer 20 on average. Doubling the sample therefore removes
+the earlier 500-rollout descriptive gain rather than strengthening it.
+
+The residual model closes a second loophole: perhaps layer 20 should only
+correct, rather than replace, layer-32 information. The layer-32 model is frozen
+and the auxiliary branch is initialized to an exact zero correction. The real
+residual has the largest descriptive AUC, but its +0.007 gain over layer 32 is
+unresolved and it exceeds the capacity-matched shuffled residual by only +0.002
+(95% CI [-0.008, 0.011], $p=0.721$). The AUC evidence therefore does not
+attribute the residual model's apparent gain to episode-aligned layer 20.
+
+Functional conformal evaluation tests whether the small ranking change becomes
+a useful warning change. In addition to the benchmark-compatible retrospective
+`task_min_step` window, we calibrate and evaluate at stride-adjusted counterparts
+of the predeclared 50/100/148-step windows: 13, 25, and 37 processed samples.
+The shortest processed rollout has length 37, so these fixed-window results use
+no padding, score extension, or rollout exclusion.
+
+At independently grid-selected operating points with at most 5% macro realized
+FPR, the direct layer-32 comparison is:
+
+| Evaluation window | Layer-32 FPR | Layer-32 catch | Layer-20+32 FPR | Layer-20+32 catch | Catch-rate delta (95% task-bootstrap CI) |
+|---|---:|---:|---:|---:|---:|
+| Retrospective earliest stop | 0.037 | 0.136 | 0.029 | 0.100 | -0.036 [-0.068, 0.002] |
+| Fixed 50-step counterpart | 0.037 | 0.089 | 0.043 | 0.081 | -0.008 [-0.056, 0.047] |
+| Fixed 100-step counterpart | 0.031 | 0.082 | 0.036 | 0.081 | -0.002 [-0.038, 0.039] |
+| Fixed 148-step counterpart | 0.046 | 0.137 | 0.030 | 0.094 | -0.043 [-0.088, -0.003] |
+
+The conditional intervals above hold the independently selected alpha grid
+points fixed. Direct fusion catches no more failures in any window and has less
+effective lead in every window. It also does not resolve against shuffled
+fusion: real-minus-shuffled catch-rate intervals cross zero retrospectively and
+at all three fixed horizons.
+
+The residual formulation produces one limited positive result:
+
+| Evaluation window | Layer-32 FPR / catch | Residual FPR / catch | Shuffled residual FPR / catch |
+|---|---:|---:|---:|
+| Retrospective earliest stop | 0.037 / 0.136 | 0.044 / 0.172 | 0.040 / 0.148 |
+| Fixed 50-step counterpart | 0.037 / 0.089 | 0.042 / 0.095 | 0.036 / 0.088 |
+| Fixed 100-step counterpart | 0.031 / 0.082 | 0.043 / 0.105 | 0.033 / 0.084 |
+| Fixed 148-step counterpart | 0.046 / 0.137 | 0.038 / 0.112 | 0.048 / 0.144 |
+
+Retrospectively, the residual improves catch by +0.036 over layer 32 (95% CI
+[0.017, 0.057], exact sign-flip $p=0.011$) and +0.025 over shuffled residual
+(95% CI [0.006, 0.043], $p=0.044$). Its effective-lead fraction also improves
+by +0.018 over layer 32 (95% CI [0.005, 0.032]), while realized FPR rises by
+0.8 percentage points and remains below 5%. This is evidence that aligned layer
+20 can affect the residual model's retrospective warning behavior.
+
+It is not a robust deployment result. At the fixed 50-step horizon the residual
+contrast is unresolved. At 100 steps, catch improves by +0.022 but realized FPR
+also rises by +0.012; the real-versus-shuffled catch interval narrowly crosses
+zero. At 148 steps the residual catches fewer failures and warns later. The
+operating points were selected from the same alpha grid on these held-out
+results, and the many architecture/window comparisons were not multiplicity
+adjusted. The appropriate consequence is a preregistered residual-only
+replication, not a claim that multiple layers improve SAFE.
+
+An older three-task split had shown a larger gain for a late-layer mixer, so we
+also tested layers 24, 28, and 32. The original development set contained 450
+usable rollouts across nine tasks. The newly added second shard provides an
+independent 500-rollout, ten-task replication with the same model,
+within-partition shuffled control, three training seeds, and LOTO protocol:
+
+| Dataset | Layer-32 AUC | Real 24+28+32 AUC | Shuffled AUC | Real minus layer 32 (95% CI) | Real minus shuffled (95% CI) |
+|---|---:|---:|---:|---:|---:|
+| Development: 450 rollouts, 9 tasks | 0.586 | 0.609 | 0.573 | +0.023 [-0.008, 0.049] | +0.036 [0.002, 0.070] |
+| Independent shard: 500 rollouts, 10 tasks | 0.681 | 0.703 | 0.667 | +0.022 [-0.010, 0.053] | +0.037 [-0.004, 0.079] |
+
+The replication reproduces both point estimates almost exactly. Direct gains
+are positive on 7/10 replication tasks, but the task-bootstrap interval crosses
+zero and the exact sign-flip test is unresolved ($p=0.229$). The real model
+beats shuffled fusion on only 5/10 replication tasks ($p=0.134$). Gate behavior
+also replicates: the development model assigns 46.0%, 41.7%, and 12.3% mean
+weight to layers 24, 28, and 32; the independent model assigns 43.3%, 44.9%, and
+11.8%. These repeated effect sizes and gate weights strengthen the narrow claim
+that layers 24 and 28 contain complementary episode-level information, while
+the task-level uncertainty still does not establish better ranking.
+
+Functional conformal evaluation on the independent shard again fails to turn
+that information into warning utility:
+
+| Monitor | Realized FPR | Catch rate | Effective lead fraction |
+|---|---:|---:|---:|
+| Layer 32 | 0.047 | 0.114 | 0.052 |
+| Dynamic layers 24 + 28 + 32 | 0.036 | 0.090 | 0.043 |
+| Shuffled layers 24 + 28 + 32 | 0.047 | 0.082 | 0.050 |
+
+At the fixed 50-step counterpart, real fusion's catch delta versus layer 32 is
++0.010 (95% CI [-0.012, 0.033]); at 100 and 148 steps it is -0.004 and -0.015,
+with both intervals crossing zero. Real-versus-shuffled catch intervals also
+cross zero in every window. Moreover, one of the three training seeds has no
+alpha-grid point below 5% realized FPR for any variant, demonstrating material
+calibration instability.
+
+The independent replication therefore makes the mechanistic signal more
+credible but also replicates the operational negative result. It supports one
+narrow statement—late layers carry some complementary information—but **does
+not support claiming a better SAFE monitor or a broad multilayer campaign**.
+
+### 4.3 Latent geometry is organized strongly by task
 
 Linear CKA shows that depth changes the representation: L1-L32 CKA is 0.447 and
 L4-L32 is 0.495, while L28-L32 is 0.980. The UMAP visualization likewise forms
@@ -251,7 +391,10 @@ performance metric.
 3. Cross-task early ranking is modest and highly task dependent under LOTO.
 4. SAFE's functional conformal procedure does not produce an operating point
    that is simultaneously low-FPR, high-recall, and timely on held-out tasks.
-5. The tested layer-fusion methods do not reliably improve held-out-task AUC.
+5. Capacity-matched direct fusion does not improve layer-32 held-out AUC or
+   functional-CP warning. A larger residual model improves one retrospective
+   low-FPR operating point, including against its shuffled control, but the
+   effect does not persist across fixed horizons and its AUC gain is unresolved.
 
 ### Not supported
 
@@ -262,8 +405,9 @@ performance metric.
    limited transfer and poor alarm utility, not absence of all signal.
 4. That functional conformal prediction is generally invalid. The result is a
    distribution-transfer failure in this task-held-out reproduction.
-5. That additional layers can never help; only that the tested PCA/PLS fusion
-   methods show no reliable held-out gain.
+5. That additional layers can never help. Several real-versus-shuffled
+   contrasts suggest complementary signal, but none of the tested methods
+   establishes a robust fixed-horizon warning improvement over layer 32.
 
 ## 6. Recommended evaluation protocol
 
@@ -293,6 +437,14 @@ A credible multitask VLA failure-detection result should report:
   became unavoidable.
 - `task_min_step` is benchmark-compatible but retrospective. A deployment claim
   needs fixed, predeclared horizons or online stopping rules.
+- The predeclared 50/100/148-step sensitivity and public per-timestep score
+  bundle for the primary 1,000-rollout MLP/LSTM analysis are closeout
+  requirements but are not present in this release candidate. The second
+  full-rate layer-32 shard is staged and validated; the first survives only in
+  stride-4 form. The secondary 1,000-rollout layer-20 follow-up includes
+  stride-adjusted versions of those fixed horizons, but its newly trained
+  dynamic models and stride-4 inputs cannot substitute for the finalized
+  primary probes.
 - Functional CP matches the published SAFE code path, but this is an independent
   reproduction rather than an author-verified reanalysis.
 - The pair decomposition uses the three original task-held-out splits. It is
@@ -301,6 +453,13 @@ A credible multitask VLA failure-detection result should report:
 - The current rollout artifacts do not provide failure-onset labels or the
   action-conditioned counterfactual data needed to evaluate recovery or
   reachability certificates.
+- The layer-20/32 time-resolved follow-up now covers 1,000 rollouts over all 10
+  tasks. Its residual result was discovered across several architecture/window
+  comparisons and needs preregistered replication. The original 450-rollout,
+  nine-task late-layer result has an independent 500-rollout, ten-task
+  replication, but the two shards cannot currently be combined into a single
+  1,000-rollout late-layer analysis because the first surviving compact shard
+  lacks layers 24/28.
 
 ## 8. Reproducibility and artifact map
 
@@ -311,8 +470,12 @@ A credible multitask VLA failure-detection result should report:
 | Timeout structure | `scripts/plot_success_length_dist.py` | [`success_length_violin.png`](success_length_violin.png) |
 | Pooled/macro pair decomposition | `scripts/score_layer_pooled_macro.py`, `scripts/analyze_pooled_macro_decomposition.py` | [`pooled_auc_decomposition.png`](pooled_auc_decomposition.png), [`pair_decomposition_descriptive.csv`](results_audit/pair_decomposition_descriptive.csv) |
 | LOTO early AUC | finalized LOTO checkpoint summaries | [`loto_macro_ci.csv`](results_audit/loto_macro_ci.csv), [`loto_per_task_auc.csv`](results_audit/loto_per_task_auc.csv) |
+| Primary checkpoint/split contract | `scripts/verify_primary_checkpoints.py` | [`primary_checkpoint_audit.json`](results_audit/primary_checkpoint_audit.json) |
 | Functional CP under LOTO | `scripts/evaluate_functional_cp_loto.py`, `scripts/evaluate_conformal.py` | [`functional_cp_loto_report.md`](results_audit/functional_cp_loto_report.md), [`functional_cp_loto_macro.csv`](results_audit/functional_cp_loto_macro.csv), [`functional_cp_loto_per_task.csv`](results_audit/functional_cp_loto_per_task.csv) |
 | Added-layer value | layer-complementarity analyses | [`layer_incremental_delta_summary.csv`](results_audit/layer_incremental_delta_summary.csv) |
+| Layer-20/32 ten-task follow-up | `scripts/evaluate_dynamic_layer_loto.py`, `scripts/evaluate_dynamic_layer_functional_cp.py`, `scripts/summarize_dynamic_layer_seeds.py` | [`shard-0 manifest`](results_audit/dynamic_layer_data_manifest_1000_shard0.json), [`shard-1 manifest`](results_audit/dynamic_layer_data_manifest_1000_shard1.json), [`dynamic_layer_loto_1000_summary.json`](results_audit/dynamic_layer_loto_1000_summary.json), [`dynamic_layer_loto_1000_per_task.csv`](results_audit/dynamic_layer_loto_1000_per_task.csv), [`dynamic_layer_functional_cp_1000_macro.csv`](results_audit/dynamic_layer_functional_cp_1000_macro.csv), [`dynamic_layer_functional_cp_1000_operating_points.csv`](results_audit/dynamic_layer_functional_cp_1000_operating_points.csv), [`dynamic_layer_functional_cp_1000_comparisons.csv`](results_audit/dynamic_layer_functional_cp_1000_comparisons.csv) |
+| Late-layer nine-task follow-up | `scripts/evaluate_dynamic_layer_loto.py`, `scripts/evaluate_dynamic_layer_functional_cp.py` | [`dynamic_layer_data_manifest.json`](results_audit/dynamic_layer_data_manifest.json), [`dynamic_late_layer_loto_450_summary.json`](results_audit/dynamic_late_layer_loto_450_summary.json), [`dynamic_late_layer_functional_cp_macro.csv`](results_audit/dynamic_late_layer_functional_cp_macro.csv), [`dynamic_late_layer_functional_cp_operating_points.csv`](results_audit/dynamic_late_layer_functional_cp_operating_points.csv) |
+| Independent late-layer replication | `scripts/evaluate_dynamic_layer_loto.py`, `scripts/evaluate_dynamic_layer_functional_cp.py`, `scripts/summarize_dynamic_layer_seeds.py` | [`replication manifest`](results_audit/dynamic_late_layer_replication_data_manifest.json), [`dynamic_late_layer_replication_loto_summary.json`](results_audit/dynamic_late_layer_replication_loto_summary.json), [`dynamic_late_layer_replication_loto_per_task.csv`](results_audit/dynamic_late_layer_replication_loto_per_task.csv), [`dynamic_late_layer_replication_functional_cp_macro.csv`](results_audit/dynamic_late_layer_replication_functional_cp_macro.csv), [`dynamic_late_layer_replication_functional_cp_operating_points.csv`](results_audit/dynamic_late_layer_replication_functional_cp_operating_points.csv), [`dynamic_late_layer_replication_functional_cp_comparisons.csv`](results_audit/dynamic_late_layer_replication_functional_cp_comparisons.csv) |
 | Representation similarity | layer-complementarity analyses | [`linear_cka_table.csv`](results_audit/linear_cka_table.csv), [`umap_by_task.png`](umap_by_task.png) |
 
 ### Commands for the final headline analyses
@@ -346,6 +509,77 @@ uv run python scripts/evaluate_functional_cp_loto.py \
   --cp-seeds 0,1,2,3,4,5,6,7,8,9 \
   --horizon 520 --batch-size 8 --task-bootstrap 10000 \
   --bootstrap-seed 20260716
+
+# Normalize the second 500-rollout shard to match the first compact shard:
+uv run python scripts/prepare_openvla_layer_subset.py \
+  --input-root data/processed/OpenVLA_500_2 \
+  --output-root data/processed/openVLA_500_2_l20_l32_last_s4 \
+  --layers 20,32 --token-index -1 --temporal-stride 4 \
+  --expected-rollouts 500 --expected-tasks 0,1,2,3,4,5,6,7,8,9 \
+  --expected-rollouts-per-task 50 --minimum-length 37
+
+# Compose a stable ordered union with hard links (no duplicate tensor storage):
+mkdir -p data/processed/openVLA_1000_l20_l32_last_s4/shard0 \
+         data/processed/openVLA_1000_l20_l32_last_s4/shard1
+cp -Rl data/processed/openVLA_500_l20_l32_last_s4/. \
+       data/processed/openVLA_1000_l20_l32_last_s4/shard0/
+cp -Rl data/processed/openVLA_500_2_l20_l32_last_s4/. \
+       data/processed/openVLA_1000_l20_l32_last_s4/shard1/
+
+uv run python scripts/evaluate_dynamic_layer_loto.py \
+  --root data/processed/openVLA_1000_l20_l32_last_s4 \
+  --output-dir runs/openvla_dynamic_layer_loto_1000 \
+  --variants baseline32,layer20_32,shuffled20_32,residual20_32,shuffled_residual20_32 \
+  --epochs 30 --patience 5 --batch-size 16 \
+  --projection-dim 32 --hidden-dim 64 --seed 20260722
+
+# Repeat as runs/openvla_dynamic_layer_loto_1000_seed1 and ..._seed2 with
+# --seed 20260723 and --seed 20260724, respectively.
+
+uv run python scripts/evaluate_dynamic_layer_functional_cp.py \
+  --root data/processed/openVLA_1000_l20_l32_last_s4 \
+  --checkpoint-dir runs/openvla_dynamic_layer_loto_1000 \
+  --output-dir runs/openvla_dynamic_layer_loto_1000/functional_cp \
+  --alphas 0.01,0.025,0.05,0.075,0.1,0.15,0.2,0.3 \
+  --cp-seeds 0,1,2,3,4,5,6,7,8,9 \
+  --horizon 130 --fixed-horizons 13,25,37 \
+  --task-bootstrap 20000 --bootstrap-seed 20260722
+
+# Repeat functional CP for the other two checkpoint directories, then aggregate:
+uv run python scripts/summarize_dynamic_layer_seeds.py \
+  --summary runs/openvla_dynamic_layer_loto_1000/summary.json \
+            runs/openvla_dynamic_layer_loto_1000_seed1/summary.json \
+            runs/openvla_dynamic_layer_loto_1000_seed2/summary.json \
+  --cp-raw runs/openvla_dynamic_layer_loto_1000/functional_cp/functional_cp_raw.csv \
+           runs/openvla_dynamic_layer_loto_1000_seed1/functional_cp/functional_cp_raw.csv \
+           runs/openvla_dynamic_layer_loto_1000_seed2/functional_cp/functional_cp_raw.csv \
+  --output-dir runs/openvla_dynamic_layer_loto_1000_seed_aggregate \
+  --n-bootstrap 20000 --bootstrap-seed 20260722
+
+# Independent late-layer replication: repeat training and functional CP for
+# seeds 20260722, 20260723, and 20260724, then aggregate as above.
+uv run python scripts/prepare_openvla_layer_subset.py \
+  --input-root data/processed/OpenVLA_500_2 \
+  --output-root data/processed/openVLA_500_2_l24_l28_l32_last_s4 \
+  --layers 24,28,32 --token-index -1 --temporal-stride 4 \
+  --expected-rollouts 500 --expected-tasks 0,1,2,3,4,5,6,7,8,9 \
+  --expected-rollouts-per-task 50 --minimum-length 37
+
+uv run python scripts/evaluate_dynamic_layer_loto.py \
+  --root data/processed/openVLA_500_2_l24_l28_l32_last_s4 \
+  --dataset-layers 24,28,32 \
+  --output-dir runs/openvla_dynamic_late_loto_500_2_repl \
+  --variants baseline32,late24_28_32,shuffled_late24_28_32 \
+  --epochs 30 --patience 5 --batch-size 16 \
+  --projection-dim 32 --hidden-dim 64 --seed 20260722
+
+uv run python scripts/evaluate_dynamic_layer_functional_cp.py \
+  --root data/processed/openVLA_500_2_l24_l28_l32_last_s4 \
+  --dataset-layers 24,28,32 \
+  --checkpoint-dir runs/openvla_dynamic_late_loto_500_2_repl \
+  --output-dir runs/openvla_dynamic_late_loto_500_2_repl/functional_cp \
+  --horizon 130 --fixed-horizons 13,25,37 \
+  --task-bootstrap 20000 --bootstrap-seed 20260722
 ```
 
 ### References

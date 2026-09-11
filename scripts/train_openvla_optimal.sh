@@ -17,7 +17,7 @@
 # script re-run to resume. A crash mid-run re-runs only that one (model, seed).
 #
 # RunPod setup (once):
-#   pip install -r requirements.txt          # or your env's torch + numpy + scikit-learn + wandb
+#   uv sync --frozen --extra tracking        # tracking is only needed for W&B
 #   wandb login                              # or:  export WANDB_MODE=offline
 #   # make sure the rollouts are at data/rollouts/openvla (override with ROOT=...)
 #

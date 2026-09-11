@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this audit, please cite the repository and the SAFE paper."
+title: "When Pooled AUC Is Not Early Warning: A SAFE/OpenVLA Audit"
+type: software
+version: 1.0.0
+date-released: 2026-08-01
+authors:
+  - name: "extend-SAFE contributors"
+repository-code: "https://github.com/WaterPancake/extend-SAFE"
+url: "https://github.com/WaterPancake/extend-SAFE/blob/main/docs/safe_openvla_audit.md"
+license: MIT
+keywords:
+  - conformal prediction
+  - failure detection
+  - vision-language-action models
+  - OpenVLA
+  - LIBERO
+references:
+  - type: article
+    title: "SAFE: Multitask Failure Detection for Vision-Language-Action Models"
+    authors:
+      - family-names: Gu
+        given-names: Q.
+    year: 2025
+    url: "https://arxiv.org/abs/2506.09937"
+

@@ -33,7 +33,7 @@
 #   skipped; an interrupted token re-runs its cells (cheap -- cache is warm).
 #
 # RunPod setup (once):
-#   pip install -r requirements.txt
+#   uv sync --frozen
 #   wandb login                       # or:  export WANDB_MODE=offline
 #   # rollouts at data/rollouts/openvla (override with ROOT=...)
 #

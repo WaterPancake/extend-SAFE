@@ -1,0 +1,36 @@
+[project]
+name = "extend-safe-audit"
+version = "1.0.0"
+description = "Reproducible audit of SAFE-style OpenVLA failure detection on LIBERO"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = { file = "LICENSE" }
+dependencies = [
+  "matplotlib>=3.8",
+  # Resolver floors keep UMAP's JIT stack on Python-3.10-compatible releases.
+  "llvmlite>=0.44",
+  "numba>=0.61.2",
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "pynndescent>=0.5.13",
+  "scikit-learn>=1.4",
+  "scipy>=1.11",
+  "torch>=2.2",
+  "umap-learn>=0.5.5",
+]
+
+[project.optional-dependencies]
+tracking = ["wandb>=0.17"]
+dev = ["cffconvert>=2.0.0", "pytest>=8.3"]
+
+[project.urls]
+Repository = "https://github.com/WaterPancake/extend-SAFE"
+Report = "https://github.com/WaterPancake/extend-SAFE/blob/main/docs/safe_openvla_audit.md"
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["."]
+testpaths = ["tests"]

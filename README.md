@@ -1,5 +1,14 @@
 # extend-SAFE
 
+> **Pooled ROC-AUC (0.747 / 0.755) does not imply reliable early failure warning
+> on unseen tasks.** Under 10-fold LOTO with SAFE functional conformal
+> calibration at ≤5% realized FPR, catch rate is only 8.5% (MLP) / 6.9% (LSTM)
+> with mean alarm at 95.5% of the evaluation window.
+
+<p align="center">
+<img src="docs/functional_cp_loto_tradeoff.png" alt="Failure catch rate versus realized false-positive rate. Color records effective alarm position — lower (greener) is earlier." width="720">
+</p>
+
 This repository is a reproducible audit of SAFE-style failure detection over
 OpenVLA representations on ten LIBERO tasks. Its main finding is deliberately
 narrow: **in this reproduction, strong pooled ROC-AUC does not imply timely,

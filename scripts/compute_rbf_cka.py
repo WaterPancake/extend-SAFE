@@ -232,7 +232,6 @@ def main() -> None:
         writer.writerow([""] + [f"L{L}" for L in LAYERS])
         for i, L in enumerate(LAYERS):
             writer.writerow([f"L{L}"] + [f"{lin_cka[i,j]:.6f}" for j in range(len(LAYERS))])
-        writer.writerow([])
         writer.writerow(["RBF"] + [f"L{L}" for L in LAYERS])
         for i, L in enumerate(LAYERS):
             writer.writerow([f"L{L}"] + [f"{rbf_cka_mat[i,j]:.6f}" for j in range(len(LAYERS))])

@@ -437,10 +437,36 @@ broad multilayer campaign**.
 ### 4.3 Latent geometry is organized strongly by task
 
 Linear CKA shows that depth changes the representation: L1-L32 CKA is
-0.447 and L4-L32 is 0.495, while L28-L32 is 0.980. The UMAP
+0.466 and L4-L32 is 0.512, while L28-L32 is 0.980. The UMAP
 visualization likewise forms clearer task clusters in later layers. This
 explains how a pooled evaluator can benefit from task identity, but it
 is only a diagnostic; UMAP geometry is not a performance metric.
+
+Linear CKA captures only second-order (covariance) similarity. To test
+whether nonlinear structure changes the picture, we also computed
+RBF-kernel CKA with a median-heuristic bandwidth on the same
+1,000-rollout, 9-layer, rollout-pooled features
+([`rbf_cka_table.csv`](results_audit/rbf_cka_table.csv),
+[`cka_linear_vs_rbf.csv`](results_audit/cka_linear_vs_rbf.csv)):
+
+| Pair | Linear CKA | RBF CKA | Difference |
+|-----|----------:-------:|-----------:|
+| L1–L32 | 0.466 | 0.670 | +0.204 |
+| L4–L32 | 0.512 | 0.726 | +0.214 |
+| L8–L32 | 0.727 | 0.865 | +0.138 |
+| L20–L32 | 0.883 | 0.953 | +0.070 |
+| L24–L32 | 0.957 | 0.975 | +0.018 |
+| L28–L32 | 0.980 | 0.987 | +0.007 |
+
+RBF CKA is uniformly higher than linear CKA, and the gap is largest for
+shallow–deep pairs. This means that shallow and deep layers share more
+nonlinear structure than linear CKA suggests. The deep block (L24–L32)
+remains highly similar under both kernels (0.957 linear, 0.975 RBF), and
+the shallow–deep de-correlation is stronger under linear CKA, so the
+qualitative conclusion — representations de-correlate with depth —
+holds under both. The RBF result does not overturn the linear CKA
+finding, but it does show that the linear kernel overestimates the
+shallow–deep representational distance.
 
 <img src="umap_by_task.png"
 data-fig-alt="Nine UMAP panels, one per hidden layer, showing increasingly separated clusters for the ten tasks."
